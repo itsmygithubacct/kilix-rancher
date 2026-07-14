@@ -339,18 +339,36 @@ static void draw_glyph_cell(int cell, int x, int y, int w, int h,
     if (cell < 0 || cell >= cells || w <= 0 || h <= 0) return;
     int base = cell * FONT_CELL_W;
     int tr = (color >> 16) & 255, tg = (color >> 8) & 255, tb = color & 255;
+    int ah = font_atlas.h < FONT_CELL_H ? font_atlas.h : FONT_CELL_H;
+    /* Area-average the 40x56 glyph cell down to the requested WxH: for each
+     * destination pixel, average the luminance of the source block it covers
+     * (magenta counts as empty), and use the covered fraction as the pixel's
+     * alpha. This anti-aliases the down-scale so edges stay smooth instead of
+     * the jagged fringe nearest-neighbour point-sampling produced. */
     for (int dy = 0; dy < h; dy++) {
-        int sy = dy * FONT_CELL_H / h;
-        if (sy >= font_atlas.h) sy = font_atlas.h - 1;   /* atlas may be short */
+        int sy0 = dy * ah / h, sy1 = (dy + 1) * ah / h;
+        if (sy1 <= sy0) sy1 = sy0 + 1;
         for (int dx = 0; dx < w; dx++) {
-            int sx = base + dx * FONT_CELL_W / w;
-            uint32_t p = font_atlas.px[sy * font_atlas.w + sx];
-            if (is_chroma(p)) continue;
-            int lum = p & 255;                       /* grayscale: any channel */
+            int sx0 = base + dx * FONT_CELL_W / w;
+            int sx1 = base + (dx + 1) * FONT_CELL_W / w;
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            long acc = 0;
+            int covered = 0, area = 0;
+            for (int sy = sy0; sy < sy1; sy++)
+                for (int sx = sx0; sx < sx1; sx++) {
+                    uint32_t p = font_atlas.px[sy * font_atlas.w + sx];
+                    area++;
+                    if (is_chroma(p)) continue;
+                    acc += p & 255;                  /* grayscale: any channel */
+                    covered++;
+                }
+            if (!covered) continue;
+            int lum = (int)(acc / covered);
+            float cov = (float)covered / (float)area;
             uint32_t c = (uint32_t)(tr * lum / 255) << 16 |
                          (uint32_t)(tg * lum / 255) << 8 |
                          (uint32_t)(tb * lum / 255);
-            pixel_blend(x + dx, y + dy, c, alpha);
+            pixel_blend(x + dx, y + dy, c, alpha * cov);
         }
     }
 }
@@ -433,6 +451,45 @@ static void draw_wrapped_text(int x, int y, int width, const char *text,
     }
     if (line_length && lines < max_lines)
         draw_text(x, y + lines * 9 * scale, line, color, alpha, scale);
+}
+
+/* Word-wrap centered on cx within `width`; returns the number of lines drawn so
+ * the caller can flow following content below it. */
+static int draw_wrapped_center(int cx, int y, int width, const char *text,
+                               uint32_t color, float alpha, int scale,
+                               int max_lines)
+{
+    char line[160] = {0};
+    int line_length = 0, lines = 0;
+    int max_characters = width / (6 * scale);
+    if (max_characters < 1) max_characters = 1;
+    const char *word = text;
+    while (*word && lines < max_lines) {
+        while (*word == ' ') word++;
+        const char *end = word;
+        while (*end && *end != ' ') end++;
+        int word_length = (int)(end - word);
+        if (line_length && line_length + 1 + word_length > max_characters) {
+            draw_text_center(cx, y + lines * 9 * scale, line, color, alpha, scale);
+            lines++;
+            line[0] = '\0';
+            line_length = 0;
+            if (lines >= max_lines) break;
+        }
+        if (line_length) line[line_length++] = ' ';
+        int copy = word_length;
+        if (copy > (int)sizeof line - line_length - 1)
+            copy = (int)sizeof line - line_length - 1;
+        memcpy(line + line_length, word, (size_t)copy);
+        line_length += copy;
+        line[line_length] = '\0';
+        word = end;
+    }
+    if (line_length && lines < max_lines) {
+        draw_text_center(cx, y + lines * 9 * scale, line, color, alpha, scale);
+        lines++;
+    }
+    return lines;
 }
 
 static bool ppm_token(FILE *file, char *buffer, size_t length)
@@ -1601,15 +1658,30 @@ void render_shutdown(void)
     free_bitmap(&font_atlas);
 }
 
-static const char *drill_howto(MinigameType type)
+/* Short instruction (what to do) and control hint (which keys), kept separate
+ * so each renders on one line inside the signboard. */
+static const char *drill_action(MinigameType type)
 {
     switch (type) {
-    case MG_TIMING:   return "STOP THE SPARK IN THE GLOWING BAND  -  SPACE";
-    case MG_REACTION: return "STRIKE THE MOMENT THE EMBER FLARES  -  SPACE";
-    case MG_MEMORY:   return "WATCH, THEN REPEAT THE SPARKS  -  KEYS 1-4";
-    case MG_MASH:     return "MASH SPACE TO STOKE THE FLAME!";
-    case MG_HOLD:     return "HOLD THE SHELTER STEADY  -  LEFT / RIGHT";
-    case MG_RHYTHM:   return "TAP EACH BEAT ON TIME  -  SPACE";
+    case MG_TIMING:   return "STOP THE SPARK IN THE GREEN BAND";
+    case MG_REACTION: return "STRIKE WHEN THE EMBER FLARES";
+    case MG_MEMORY:   return "WATCH, THEN REPEAT THE SPARKS";
+    case MG_MASH:     return "MASH TO STOKE THE FLAME";
+    case MG_HOLD:     return "KEEP THE SHELTER STEADY";
+    case MG_RHYTHM:   return "TAP EACH BEAT ON TIME";
+    default:          return "";
+    }
+}
+
+static const char *drill_keys(MinigameType type)
+{
+    switch (type) {
+    case MG_TIMING:   return "PRESS SPACE";
+    case MG_REACTION: return "PRESS SPACE";
+    case MG_MEMORY:   return "KEYS 1 - 4";
+    case MG_MASH:     return "MASH SPACE";
+    case MG_HOLD:     return "LEFT / RIGHT";
+    case MG_RHYTHM:   return "PRESS SPACE";
     default:          return "";
     }
 }
@@ -1634,8 +1706,8 @@ static const char *drill_detail(MinigameType type)
         return "The marker drifts on its own. Tap LEFT and RIGHT to keep it inside "
                "the green band. You are scored on how long you stay centered.";
     case MG_RHYTHM:
-        return "The ring flares on each of six beats. Tap SPACE right as it flares "
-               "- the closer to the beat, the better each hit scores.";
+        return "A heartbeat swells five times at a steady tempo. Tap SPACE right as "
+               "the bell peaks - the closer to the beat, the more each tap scores.";
     default:
         return "";
     }
@@ -1677,27 +1749,34 @@ static void draw_drill(void)
 
     if (m->phase == 0) {                          /* get-ready: read + countdown */
         int n = clampi(3 - (int)(m->clock / 0.8f), 1, 3);
-        /* Sprite signboard behind the instructions (procedural panel if absent). */
+        /* Wider signboard behind the instructions (procedural panel if absent),
+         * sized so every drill's action, control hint, and detail fit inside
+         * the parchment without clipping. */
         bool board = mg_board.ok;
         if (board)
-            draw_sprite_at(&mg_board, LW / 2, 232, 560, 0xFFFFFF, 0.0f);
+            draw_sprite_at(&mg_board, LW / 2, 226, 620, 0xFFFFFF, 0.0f);
         else
-            panel(LW / 2 - 260, 132, 520, 210, NIGHT, 0.93f);
-        uint32_t htxt = board ? 0x7A2F10 : GOLD;
+            panel(LW / 2 - 250, 56, 500, 300, NIGHT, 0.93f);
+        uint32_t htxt = board ? 0x7A2F10 : GOLD;    /* title on the parchment */
+        uint32_t atxt = board ? 0x33220F : CREAM;   /* action instruction     */
+        uint32_t ktxt = board ? 0x9A5A22 : ORANGE;  /* control-key hint       */
         uint32_t btxt = board ? 0x4A3420 : 0x9DD7BE;
-        draw_text_center(LW / 2, 150, DRILLS[di].name, htxt, 0.95f, 3);
-        draw_text_center(LW / 2, 188, drill_howto(m->type), board ? 0x3A2416 : CREAM,
-                         0.84f, 2);
-        draw_wrapped_text(LW / 2 - 205, 218, 410, drill_detail(m->type),
-                          btxt, 0.78f, 1, 3);
+        draw_text_center(LW / 2, 72, DRILLS[di].name, htxt, 0.95f, 3);
+        int ay = 116;
+        int al = draw_wrapped_center(LW / 2, ay, 452, drill_action(m->type),
+                                     atxt, 0.9f, 2, 2);
+        int ky = ay + al * 22;
+        draw_text_center(LW / 2, ky, drill_keys(m->type), ktxt, 0.92f, 2);
+        draw_wrapped_center(LW / 2, ky + 34, 452, drill_detail(m->type),
+                            btxt, 0.82f, 1, 4);
         /* Countdown numeral as an animated fire sprite (pops in, settles). */
         float pop = 1.0f - fmodf(m->clock, 0.8f) / 0.8f;         /* 1 -> 0 */
-        float scale = 96.0f + pop * 44.0f;
+        float scale = 86.0f + pop * 40.0f;
         if (mg_num[n - 1].ok)
-            draw_sprite_at(&mg_num[n - 1], LW / 2, 400, scale, 0xFFFFFF, 0.0f);
+            draw_sprite_at(&mg_num[n - 1], LW / 2, 312, scale, 0xFFFFFF, 0.0f);
         else {
             char num[8]; snprintf(num, sizeof num, "%d", n);
-            draw_text_center(LW / 2, 388, num, ORANGE, 1.4f, 3);
+            draw_text_center(LW / 2, 300, num, ORANGE, 1.4f, 3);
         }
         return;
     }
@@ -1715,7 +1794,7 @@ static void draw_drill(void)
     }
 
     /* phase 1: the live game */
-    draw_text_center(LW / 2, 66, drill_howto(m->type), CREAM, 0.9f, 1);
+    draw_text_center(LW / 2, 66, drill_action(m->type), CREAM, 0.9f, 1);
     if (m->rounds > 1) {
         char rr[48];
         snprintf(rr, sizeof rr, "ROUND %d / %d", m->round + 1, m->rounds);
@@ -1752,16 +1831,29 @@ static void draw_drill(void)
         break;
     case MG_MEMORY: {                                  /* four glowing spark buttons */
         static const uint32_t cols[4] = {0xF2532E, 0xF6C453, 0x6AC18D, 0x7AA9C9};
-        int active = m->showing ? (int)(m->clock / 0.55f) : -1;
-        int lit = (active >= 0 && active < m->seq_len) ? m->seq[active] : -1;
+        /* During the reveal a symbol lights for the first MEMO_LIT of its slot,
+         * then goes dark — so two identical symbols in a row flash separately. */
+        int lit = -1;
+        if (m->showing) {
+            int slot = (int)(m->clock / MEMO_SLOT);
+            float within = m->clock - slot * MEMO_SLOT;
+            if (slot >= 0 && slot < m->seq_len && within < MEMO_LIT)
+                lit = m->seq[slot];
+        }
+        /* Briefly flash the button the player just matched (feedback set on hit). */
+        int pressed = (!m->showing && m->feedback > 0.0f && m->seq_pos > 0)
+                      ? m->seq[m->seq_pos - 1] : -1;
         for (int i = 0; i < 4; i++) {
             int cx = LW / 2 - 165 + i * 110;
-            bool on = lit == i;
+            bool on = lit == i || pressed == i;
             fill_circle(cx, 430, on ? 46 : 33, cols[i], on ? 1.0f : 0.55f);
             fill_circle(cx, 430, on ? 46 : 33, 0xFFFFFF, on ? 0.28f : 0.0f);
             char lab[4]; snprintf(lab, sizeof lab, "%d", i + 1);
             draw_text_center(cx, 422, lab, INK, 1.0f, 2);
         }
+        /* Status line: WATCH while revealing, REPEAT while the player answers. */
+        draw_text_center(LW / 2, 388, m->showing ? "WATCH" : "YOUR TURN",
+                         m->showing ? 0x9DD7BE : GOLD, 0.9f, 2);
         if (!m->showing)
             for (int i = 0; i < m->seq_len; i++) {
                 int cx = LW / 2 - (m->seq_len - 1) * 10 + i * 20;
@@ -1798,14 +1890,29 @@ static void draw_drill(void)
         draw_text_center(LW / 2, 470, t, GOLD, 1.0f, 2);
         break;
     }
-    case MG_RHYTHM: {                                  /* bell rings on the beat */
-        float sz = m->cue_live ? 130.0f + sinf(G.time * 40.0f) * 12.0f : 84.0f;
+    case MG_RHYTHM: {                                  /* steady heartbeat to tap */
+        /* The bell swells for RHY_APPROACH before each beat and peaks on it, so
+         * the beat is anticipated; tap when it is biggest / glowing. */
+        float beat = RHY_FIRST + m->round * RHY_PERIOD;
+        float dtb = beat - m->clock;                   /* seconds until the beat */
+        float swell = 0.0f;                            /* 0 quiet -> 1 on the beat */
+        if (dtb >= 0.0f && dtb <= RHY_APPROACH)
+            swell = 1.0f - dtb / RHY_APPROACH;
+        else if (dtb < 0.0f && dtb > -RHY_WINDOW)
+            swell = 1.0f;                              /* hold full across window */
+        bool hot = m->cue_live;
+        if (hot)                                       /* glow burst on the beat */
+            fill_circle(LW / 2, 418, 74 + (int)(sinf(G.time * 40.0f) * 6.0f),
+                        0xF6C453, 0.20f);
+        float sz = 96.0f + swell * 70.0f;              /* 96 -> 166 at the beat */
         if (mg_bell.ok)
-            draw_sprite_at(&mg_bell, LW / 2, 418, sz,
-                           m->cue_live ? 0xFFFFFF : 0x6A7078, m->cue_live ? 0.0f : 0.4f);
+            draw_sprite_at(&mg_bell, LW / 2, 418, sz, 0x6A7078,
+                           hot ? 0.0f : 0.42f * (1.0f - swell));
         else
-            fill_circle(LW / 2, 418, m->cue_live ? 30 : 22,
-                        m->cue_live ? GOLD : 0x33444A, m->cue_live ? 1.0f : 0.5f);
+            fill_circle(LW / 2, 418, hot ? 34 : 20 + (int)(swell * 14),
+                        hot ? GOLD : 0x33444A, hot ? 1.0f : 0.55f);
+        draw_text_center(LW / 2, 300, hot ? "TAP!" : "FEEL THE BEAT",
+                         hot ? 0xFFFFFF : 0x9DB0B8, 0.95f, hot ? 3 : 2);
         for (int i = 0; i < m->rounds; i++) {
             int cx = LW / 2 - (m->rounds - 1) * 15 + i * 30;
             fill_circle(cx, 492, 6, i < m->round ? GOLD : 0x33444A, 1.0f);

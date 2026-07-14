@@ -55,7 +55,7 @@ test: $(BIN) validate-assets
 	trap 'rm -rf "$$render_dir"' EXIT HUP INT TERM; \
 	./$(BIN) --render-test "$$render_dir" 1337; \
 	set -- "$$render_dir"/render_*.ppm; \
-	test "$$#" -eq 18; \
+	test "$$#" -eq 24; \
 	for image do test -s "$$image"; done
 
 audio:

@@ -22,6 +22,24 @@
 #define RANK_COUNT 6
 #define JOURNAL_PAGES 6   /* field-guide entries; matches JOURNAL_ENTRIES */
 
+/* Memory drill (Bell-and-Ember) reveal cadence, shared by the tick that
+ * advances the sequence and the renderer that lights the sparks. Each symbol
+ * owns a MEMO_SLOT window but is only lit for MEMO_LIT of it, leaving a dark
+ * gap so two identical symbols in a row read as two distinct flashes. */
+#define MEMO_SLOT 0.62f
+#define MEMO_LIT  0.40f
+
+/* Heart drill (rhythm): a steady heartbeat the player taps along to. Beats fall
+ * at a fixed tempo and the bell swells for RHY_APPROACH seconds beforehand, so
+ * every beat is anticipated rather than a surprise. A tap within RHY_WINDOW of
+ * the beat scores by closeness; taps outside are ignored (no penalty). Shared
+ * by the tick, the input handler, and the renderer so all three agree. */
+#define RHY_BEATS    5
+#define RHY_FIRST    1.0f    /* first beat, seconds into the round */
+#define RHY_PERIOD   0.80f   /* steady interval between beats */
+#define RHY_WINDOW   0.28f   /* max tap offset that still scores */
+#define RHY_APPROACH 0.80f   /* how long before a beat the bell swells */
+
 enum {
     KEY_ENTER = 1000,
     KEY_BACKSPACE,

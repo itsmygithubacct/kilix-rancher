@@ -261,21 +261,24 @@ static int render_test(const char *directory, unsigned seed)
     /* One snapshot of each drill mini-game, mid-play. */
     G.screen = SCREEN_DRILL;
     G.screen_time = 1.0f;
-    struct { MinigameType type; int rounds; const char *file; } drills[] = {
-        {MG_TIMING,   3, "render_13_drill_timing.ppm"},
-        {MG_REACTION, 3, "render_14_drill_reaction.ppm"},
-        {MG_MEMORY,   3, "render_15_drill_memory.ppm"},
-        {MG_MASH,     1, "render_16_drill_mash.ppm"},
-        {MG_HOLD,     1, "render_17_drill_hold.ppm"},
-        {MG_RHYTHM,   6, "render_18_drill_rhythm.ppm"},
+    /* `drill` is the DRILLS[] index whose primary stat yields this minigame, so
+     * each snapshot's signboard title matches the game shown. */
+    struct { MinigameType type; int rounds; int drill; const char *file; } drills[] = {
+        {MG_TIMING,   3, 1, "render_13_drill_timing.ppm"},
+        {MG_REACTION, 3, 4, "render_14_drill_reaction.ppm"},
+        {MG_MEMORY,   3, 5, "render_15_drill_memory.ppm"},
+        {MG_MASH,     1, 2, "render_16_drill_mash.ppm"},
+        {MG_HOLD,     1, 3, "render_17_drill_hold.ppm"},
+        {MG_RHYTHM,   RHY_BEATS, 0, "render_18_drill_rhythm.ppm"},
     };
     for (size_t i = 0; i < sizeof drills / sizeof drills[0]; i++) {
         memset(&G.minigame, 0, sizeof G.minigame);
         G.minigame.phase = 1;
         G.minigame.type = drills[i].type;
+        G.minigame.drill = drills[i].drill;
         G.minigame.rounds = drills[i].rounds;
         G.minigame.round = 1;
-        G.minigame.clock = 0.6f;
+        G.minigame.clock = 0.3f;              /* within a memory reveal's lit window */
         G.minigame.marker = 0.56f;
         G.minigame.target = 0.5f;
         G.minigame.half = 0.14f;
@@ -292,13 +295,32 @@ static int render_test(const char *directory, unsigned seed)
         failures += !dump_named(directory, drills[i].file);
     }
 
+    /* One snapshot of each drill's get-ready / instruction screen so the
+     * signboard text-fit stays covered by the visual regression set. */
+    struct { MinigameType type; int drill; const char *file; } info[] = {
+        {MG_TIMING,   1, "render_19_info_timing.ppm"},
+        {MG_REACTION, 4, "render_20_info_reaction.ppm"},
+        {MG_MEMORY,   5, "render_21_info_memory.ppm"},
+        {MG_MASH,     2, "render_22_info_mash.ppm"},
+        {MG_HOLD,     3, "render_23_info_hold.ppm"},
+        {MG_RHYTHM,   0, "render_24_info_rhythm.ppm"},
+    };
+    for (size_t i = 0; i < sizeof info / sizeof info[0]; i++) {
+        memset(&G.minigame, 0, sizeof G.minigame);
+        G.minigame.phase = 0;                 /* get-ready / instructions */
+        G.minigame.type = info[i].type;
+        G.minigame.drill = info[i].drill;
+        G.minigame.clock = 0.3f;              /* countdown shows "3" */
+        failures += !dump_named(directory, info[i].file);
+    }
+
     render_shutdown();
     unlink(temporary_save);
     if (failures) {
         fprintf(stderr, "render-test: %d snapshot(s) failed\n", failures);
         return 1;
     }
-    printf("PASS: wrote 18 visual snapshots to %s\n", directory);
+    printf("PASS: wrote 24 visual snapshots to %s\n", directory);
     return 0;
 }
 

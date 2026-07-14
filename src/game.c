@@ -221,6 +221,14 @@ static bool is_confirm_key(int key)
     return key == KEY_ENTER || key == '\r' || key == '\n' || key == ' ';
 }
 
+/* Enter specifically (no Space). Used where a Space-driven screen hands off to
+ * a result the player must actually see — accepting Space there would let a
+ * still-pressed Space skip it unread. */
+static bool is_enter_key(int key)
+{
+    return key == KEY_ENTER || key == '\r' || key == '\n';
+}
+
 static int lower_key(int key)
 {
     if (key >= 0 && key <= UCHAR_MAX)
@@ -625,7 +633,7 @@ static void enter_drill(int index)
     case MG_MASH:     m->rounds = 1; m->taps_target = 26; break;
     case MG_HOLD:     m->rounds = 1; m->marker = 0.5f; m->target = 0.5f;
                       m->half = 0.15f; break;
-    case MG_RHYTHM:   m->rounds = 6; break;
+    case MG_RHYTHM:   m->rounds = RHY_BEATS; break;
     default:          m->rounds = 1; break;
     }
     change_screen(SCREEN_DRILL);
@@ -656,6 +664,21 @@ static void mg_finish(MinigameState *m)
     else if (m->quality >= 0.30f) copy_text(m->banner, sizeof(m->banner), "NICE TRY");
     else                          copy_text(m->banner, sizeof(m->banner), "KEEP AT IT");
     play_sound(m->quality >= 0.55f ? SFX_WIN : SFX_MOVE);
+}
+
+/* Advance the rhythm game one beat WITHOUT resetting the clock, so the tempo
+ * stays steady across all beats (unlike mg_score_round, which restarts each
+ * round). Quality accumulates and is averaged over the beats by mg_finish. */
+static void rhythm_advance(MinigameState *m, float q, const char *tag)
+{
+    m->quality += clampf(q, 0.0f, 1.0f);
+    m->feedback = 0.30f;
+    m->cue_live = false;
+    copy_text(m->banner, sizeof(m->banner), tag);
+    play_sound(q >= 0.5f ? SFX_CONFIRM : SFX_MOVE);
+    m->round++;
+    if (m->round >= m->rounds)
+        mg_finish(m);
 }
 
 /* Record a round's quality [0,1], flash feedback, and advance or finish. */
@@ -722,8 +745,8 @@ static void minigame_tick(float dt)
         break;
     case MG_MEMORY:
         if (m->showing) {
-            /* reveal one symbol every 0.55 s, then hand over to the player */
-            int shown = (int)(m->clock / 0.55f);
+            /* reveal one symbol per slot (lit then a dark gap), then hand over */
+            int shown = (int)(m->clock / MEMO_SLOT);
             if (shown >= m->seq_len) {
                 m->showing = false;
                 m->clock = 0.0f;
@@ -747,11 +770,11 @@ static void minigame_tick(float dt)
         break;
     }
     case MG_RHYTHM: {
-        float beat = 0.9f + m->round * 0.72f;
-        if (m->clock >= beat - 0.22f && m->clock <= beat + 0.22f)
-            m->cue_live = true;
-        else if (m->clock > beat + 0.22f)
-            mg_score_round(m, 0.0f, "MISS");
+        float beat = RHY_FIRST + m->round * RHY_PERIOD;
+        if (m->clock >= beat - RHY_WINDOW && m->clock <= beat + RHY_WINDOW)
+            m->cue_live = true;                     /* window open — tap now */
+        else if (m->clock > beat + RHY_WINDOW)      /* let this beat pass */
+            rhythm_advance(m, 0.0f, "MISS");
         break;
     }
     default:
@@ -770,8 +793,10 @@ static void minigame_key(int key)
     }
     if (m->phase == 0)                           /* let the countdown run */
         return;
-    if (m->phase == 2) {                         /* result -> apply reward */
-        if (is_confirm_key(key) || key == KEY_ESC)
+    if (m->phase == 2) {                         /* result -> apply reward.
+         * Enter only: the drills are played with SPACE, so accepting Space
+         * here would let a held/mashed Space blow past the result unseen. */
+        if (is_enter_key(key) || key == KEY_ESC)
             resolve_drill(m->drill, m->quality, false);
         return;
     }
@@ -822,13 +847,12 @@ static void minigame_key(int key)
         break;
     case MG_RHYTHM:
         if (is_confirm_key(key)) {
-            float beat = 0.9f + m->round * 0.72f;
-            if (m->cue_live) {
-                float off = fabsf(m->clock - beat);
-                m->cue_live = false;
-                mg_score_round(m, clampf(1.0f - off / 0.22f, 0.0f, 1.0f),
-                               off < 0.08f ? "ON BEAT!" : "GOOD");
-            }
+            float beat = RHY_FIRST + m->round * RHY_PERIOD;
+            float off = fabsf(m->clock - beat);
+            if (off <= RHY_WINDOW)                  /* score by closeness */
+                rhythm_advance(m, clampf(1.0f - off / RHY_WINDOW, 0.0f, 1.0f),
+                               off < 0.10f ? "ON BEAT!" : "GOOD");
+            /* taps outside the window are ignored, not punished */
         }
         break;
     default:
@@ -2161,7 +2185,7 @@ static float drive_minigame(int drill, bool skilled)
             break;
         case MG_RHYTHM: {
             /* Aim for the beat centre, not the moment the window opens. */
-            float beat = 0.9f + m->round * 0.72f;
+            float beat = RHY_FIRST + m->round * RHY_PERIOD;
             if (skilled && m->cue_live && fabsf(m->clock - beat) < 0.03f)
                 minigame_key(KEY_ENTER);
             else
