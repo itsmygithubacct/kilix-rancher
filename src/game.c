@@ -19,7 +19,6 @@
 
 #define WEEKS_PER_YEAR 48
 #define WEEKS_PER_SEASON 12
-#define JOURNAL_PAGES 3
 #define BATTLE_SECONDS 60.0f
 #define SAVE_VERSION 2u
 #define SAVE_MONEY_MAX 99999999
@@ -48,7 +47,7 @@ const DrillInfo DRILLS[DRILL_COUNT] = {
     },
     {
         "Lantern Lesson", "Flame + Focus",
-        "Copy a patient sequence of lantern sparks with whisker-fire.",
+        "Stoke the paper lanterns to a blaze with fast bursts of whisker-fire.",
         STAT_INTELLECT, STAT_SKILL, 5, 9, 17, 6, 81
     },
     {
@@ -63,7 +62,7 @@ const DrillInfo DRILLS[DRILL_COUNT] = {
     },
     {
         "Bell-and-Ember", "Focus + Agility",
-        "Strike only the bell that matches the color of the floating ember.",
+        "Watch the embers' colors, then ring the bells back in the same order.",
         STAT_SKILL, STAT_SPEED, 5, 9, 18, 7, 82
     }
 };
@@ -489,38 +488,53 @@ static void begin_event(EventKind kind, const char *title, const char *detail)
     change_screen(SCREEN_EVENT);
 }
 
-static void perform_drill(int index)
+/* ---- drill mini-games --------------------------------------------------- */
+
+/* Each drill's primary stat picks its mini-game. */
+static MinigameType drill_minigame(int index)
 {
-    const DrillInfo *drill;
-    int chance;
-    int success_roll;
-    int gain_roll;
-    int great_roll;
-    int primary_gain;
-    int secondary_gain;
-    bool success;
-    bool great;
+    switch (DRILLS[index].primary) {
+    case STAT_POWER:     return MG_TIMING;
+    case STAT_SPEED:     return MG_REACTION;
+    case STAT_SKILL:     return MG_MEMORY;
+    case STAT_INTELLECT: return MG_MASH;
+    case STAT_DEFENSE:   return MG_HOLD;
+    case STAT_LIFE:      return MG_RHYTHM;
+    default:             return MG_TIMING;
+    }
+}
+
+/* Apply a drill's outcome and open its result event. `quality` in [0,1] drives
+ * the interactive path; the deterministic path (headless render-test and the
+ * scripted selftest) draws the same three RNG rolls as before so growth stays
+ * reproducible. */
+static void resolve_drill(int index, float quality, bool use_rng)
+{
+    const DrillInfo *drill = &DRILLS[index];
+    int primary_gain, secondary_gain, gain_roll;
+    bool success, great;
     char detail[192];
 
-    if (index < 0 || index >= DRILL_COUNT) {
-        game_show_toast("That drill is not in the ranch ledger.");
-        return;
+    if (use_rng) {
+        int success_roll = rng_range(1, 100);
+        gain_roll = rng_range(drill->min_gain, drill->max_gain);
+        int great_roll = rng_range(1, 100);
+        int chance = drill->success;
+        chance += G.kilix.stats.value[STAT_SKILL] / 35;
+        chance += G.kilix.bond / 18;
+        chance += (G.kilix.form - 50) / 9;
+        chance -= G.kilix.fatigue / 4;
+        chance -= G.kilix.stress / 5;
+        chance = clampi(chance, 12, 96);
+        success = success_roll <= chance;
+        great = success && great_roll <= clampi(5 + G.kilix.bond / 5, 5, 30);
+    } else {
+        quality = clampf(quality, 0.0f, 1.0f);
+        success = quality >= 0.30f;
+        great = quality >= 0.82f;
+        gain_roll = drill->min_gain +
+            (int)lroundf((drill->max_gain - drill->min_gain) * quality);
     }
-    drill = &DRILLS[index];
-
-    /* Fixed draw count keeps later outcomes reproducible across both branches. */
-    success_roll = rng_range(1, 100);
-    gain_roll = rng_range(drill->min_gain, drill->max_gain);
-    great_roll = rng_range(1, 100);
-    chance = drill->success;
-    chance += G.kilix.stats.value[STAT_SKILL] / 35;
-    chance += G.kilix.bond / 18;
-    chance += (G.kilix.form - 50) / 9;
-    chance -= G.kilix.fatigue / 4;
-    chance -= G.kilix.stress / 5;
-    chance = clampi(chance, 12, 96);
-    success = success_roll <= chance;
-    great = success && great_roll <= clampi(5 + G.kilix.bond / 5, 5, 30);
 
     if (success) {
         primary_gain = gain_roll + (great ? 3 : 0);
@@ -541,20 +555,19 @@ static void perform_drill(int index)
     normalize_game();
     game_advance_week();
 
-    if (great) {
+    if (great)
         snprintf(detail, sizeof(detail),
                  "A brilliant run! %s +%d and %s +%d. The two of you found a new rhythm.",
                  STAT_NAMES[drill->primary], primary_gain,
                  STAT_NAMES[drill->secondary], secondary_gain);
-    } else if (success) {
+    else if (success)
         snprintf(detail, sizeof(detail), "%s +%d and %s +%d. A good week's work.",
                  STAT_NAMES[drill->primary], primary_gain,
                  STAT_NAMES[drill->secondary], secondary_gain);
-    } else {
+    else
         snprintf(detail, sizeof(detail),
                  "The lesson did not click this week, but %s still grew by %d.",
                  STAT_NAMES[drill->primary], primary_gain);
-    }
 
     begin_event(EVENT_TRAIN, drill->name, detail);
     G.event.index = index;
@@ -565,6 +578,262 @@ static void perform_drill(int index)
     G.event.gain_primary = primary_gain;
     G.event.gain_secondary = secondary_gain;
     play_sound(SFX_TRAIN);
+}
+
+/* Reset the per-round state for the round-based games (the continuous games —
+ * mash, hold, rhythm — run off one continuous clock and ignore this). */
+static void mg_begin_round(MinigameState *m)
+{
+    m->clock = 0.0f;
+    m->cue_live = false;
+    m->showing = false;
+    m->seq_pos = 0;
+    switch (m->type) {
+    case MG_TIMING:
+        m->marker = 0.0f;
+        m->marker_vel = 0.85f + 0.28f * m->round;   /* faster each round */
+        m->target = 0.5f;
+        m->half = 0.12f;
+        break;
+    case MG_REACTION:
+        /* Varied but input-independent delay so there is no fixed rhythm. */
+        m->cue_at = 0.8f + 0.5f * ((m->round * 7 + 3) % 5) / 4.0f;
+        break;
+    case MG_MEMORY:
+        m->seq_len = clampi(3 + m->round, 1, 9);
+        for (int i = 0; i < m->seq_len; i++)
+            m->seq[i] = rng_range(0, 3);
+        m->showing = true;
+        break;
+    default:
+        break;
+    }
+}
+
+static void enter_drill(int index)
+{
+    MinigameState *m = &G.minigame;
+    memset(m, 0, sizeof(*m));
+    m->drill = index;
+    m->type = drill_minigame(index);
+    m->phase = 0;                 /* intro / get ready */
+    m->clock = 0.0f;
+    switch (m->type) {
+    case MG_TIMING:   m->rounds = 3; break;
+    case MG_REACTION: m->rounds = 3; break;
+    case MG_MEMORY:   m->rounds = 3; break;
+    case MG_MASH:     m->rounds = 1; m->taps_target = 26; break;
+    case MG_HOLD:     m->rounds = 1; m->marker = 0.5f; m->target = 0.5f;
+                      m->half = 0.15f; break;
+    case MG_RHYTHM:   m->rounds = 6; break;
+    default:          m->rounds = 1; break;
+    }
+    change_screen(SCREEN_DRILL);
+    play_sound(SFX_CONFIRM);
+}
+
+static void perform_drill(int index)
+{
+    if (index < 0 || index >= DRILL_COUNT) {
+        game_show_toast("That drill is not in the ranch ledger.");
+        return;
+    }
+    /* Headless render-test and the scripted selftest resolve immediately and
+     * deterministically; interactive play runs the mini-game. */
+    if (G.headless || suppress_autosave)
+        resolve_drill(index, 0.0f, true);
+    else
+        enter_drill(index);
+}
+
+static void mg_finish(MinigameState *m)
+{
+    m->quality = clampf(m->quality / (m->rounds > 0 ? m->rounds : 1), 0.0f, 1.0f);
+    m->phase = 2;
+    m->clock = 0.0f;
+    if (m->quality >= 0.82f)      copy_text(m->banner, sizeof(m->banner), "BRILLIANT!");
+    else if (m->quality >= 0.55f) copy_text(m->banner, sizeof(m->banner), "GREAT WORK");
+    else if (m->quality >= 0.30f) copy_text(m->banner, sizeof(m->banner), "NICE TRY");
+    else                          copy_text(m->banner, sizeof(m->banner), "KEEP AT IT");
+    play_sound(m->quality >= 0.55f ? SFX_WIN : SFX_MOVE);
+}
+
+/* Record a round's quality [0,1], flash feedback, and advance or finish. */
+static void mg_score_round(MinigameState *m, float q, const char *tag)
+{
+    m->quality += clampf(q, 0.0f, 1.0f);
+    m->feedback = 0.6f;
+    copy_text(m->banner, sizeof(m->banner), tag);
+    play_sound(q >= 0.6f ? SFX_CONFIRM : SFX_MOVE);
+    m->round++;
+    if (m->round >= m->rounds)
+        mg_finish(m);
+    else
+        mg_begin_round(m);
+}
+
+static float triangle_wave(float t)   /* 0 -> 1 -> 0, period 2 */
+{
+    float p = fmodf(t, 2.0f);
+    return p < 1.0f ? p : 2.0f - p;
+}
+
+/* Finish the two continuous, single-round games. Mash converts its tap count to
+ * quality here; hold has already accumulated its in-zone fraction into
+ * m->quality during the tick. */
+static void mg_finish_mash_or_hold(MinigameState *m)
+{
+    if (m->type == MG_MASH)
+        m->quality = clampf((float)m->taps /
+                            (m->taps_target > 0 ? m->taps_target : 1),
+                            0.0f, 1.0f);
+    mg_finish(m);
+}
+
+static void minigame_tick(float dt)
+{
+    MinigameState *m = &G.minigame;
+    m->clock += dt;
+    if (m->feedback > 0.0f)
+        m->feedback = clampf(m->feedback - dt, 0.0f, 1.0f);
+
+    if (m->phase == 0) {                       /* get-ready: time to read */
+        if (m->clock >= 2.4f) {
+            m->phase = 1;
+            m->clock = 0.0f;
+            mg_begin_round(m);
+        }
+        return;
+    }
+    if (m->phase != 1)
+        return;
+
+    switch (m->type) {
+    case MG_TIMING:
+        m->marker = triangle_wave(m->clock * m->marker_vel);
+        if (m->clock > 6.0f)                    /* dithered too long */
+            mg_score_round(m, 0.15f, "TOO SLOW");
+        break;
+    case MG_REACTION:
+        if (m->clock >= m->cue_at)
+            m->cue_live = true;
+        if (m->clock >= m->cue_at + 1.4f)       /* never pressed */
+            mg_score_round(m, 0.1f, "TOO SLOW");
+        break;
+    case MG_MEMORY:
+        if (m->showing) {
+            /* reveal one symbol every 0.55 s, then hand over to the player */
+            int shown = (int)(m->clock / 0.55f);
+            if (shown >= m->seq_len) {
+                m->showing = false;
+                m->clock = 0.0f;
+                m->seq_pos = 0;
+            }
+        } else if (m->clock > 6.0f) {           /* input timed out */
+            mg_score_round(m, (float)m->seq_pos / m->seq_len, "TIME!");
+        }
+        break;
+    case MG_MASH:
+        if (m->clock >= 4.0f)
+            mg_finish_mash_or_hold(m);          /* forward-declared below */
+        break;
+    case MG_HOLD: {
+        float drift = sinf(m->clock * 1.7f) * 0.9f + sinf(m->clock * 0.55f) * 0.6f;
+        m->marker = clampf(m->marker + drift * dt * 0.22f, 0.0f, 1.0f);
+        if (fabsf(m->marker - m->target) < m->half)
+            m->quality += dt / 5.0f;            /* fraction of 5 s in the zone */
+        if (m->clock >= 5.0f)
+            mg_finish_mash_or_hold(m);
+        break;
+    }
+    case MG_RHYTHM: {
+        float beat = 0.9f + m->round * 0.72f;
+        if (m->clock >= beat - 0.22f && m->clock <= beat + 0.22f)
+            m->cue_live = true;
+        else if (m->clock > beat + 0.22f)
+            mg_score_round(m, 0.0f, "MISS");
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void minigame_key(int key)
+{
+    MinigameState *m = &G.minigame;
+    if (key == KEY_ESC) {                        /* abort — no week spent */
+        game_go_ranch();
+        change_screen(SCREEN_TRAINING);
+        game_show_toast("Drill called off. No week was spent.");
+        return;
+    }
+    if (m->phase == 0)                           /* let the countdown run */
+        return;
+    if (m->phase == 2) {                         /* result -> apply reward */
+        if (is_confirm_key(key) || key == KEY_ESC)
+            resolve_drill(m->drill, m->quality, false);
+        return;
+    }
+
+    switch (m->type) {
+    case MG_TIMING:
+        if (is_confirm_key(key)) {
+            float off = fabsf(m->marker - m->target);
+            float q = clampf(1.0f - off / 0.42f, 0.0f, 1.0f);
+            mg_score_round(m, q, off < m->half ? "PERFECT!" : "GOOD");
+        }
+        break;
+    case MG_REACTION:
+        if (is_confirm_key(key)) {
+            if (!m->cue_live)
+                mg_score_round(m, 0.0f, "TOO EARLY");
+            else {
+                float rt = m->clock - m->cue_at;
+                mg_score_round(m, clampf(1.0f - rt / 0.55f, 0.0f, 1.0f),
+                               rt < 0.25f ? "SHARP!" : "OK");
+            }
+        }
+        break;
+    case MG_MEMORY:
+        if (!m->showing && key >= '1' && key <= '4') {
+            int val = key - '1';
+            if (val == m->seq[m->seq_pos]) {
+                m->seq_pos++;
+                m->feedback = 0.3f;
+                if (m->seq_pos >= m->seq_len)
+                    mg_score_round(m, 1.0f, "PERFECT!");
+            } else {
+                mg_score_round(m, (float)m->seq_pos / m->seq_len, "MISSED");
+            }
+        }
+        break;
+    case MG_MASH:
+        if (is_confirm_key(key)) {
+            m->taps++;
+            m->feedback = 0.12f;
+        }
+        break;
+    case MG_HOLD:
+        if (key == KEY_LEFT || lower_key(key) == 'a')
+            m->marker = clampf(m->marker - 0.07f, 0.0f, 1.0f);
+        else if (key == KEY_RIGHT || lower_key(key) == 'd')
+            m->marker = clampf(m->marker + 0.07f, 0.0f, 1.0f);
+        break;
+    case MG_RHYTHM:
+        if (is_confirm_key(key)) {
+            float beat = 0.9f + m->round * 0.72f;
+            if (m->cue_live) {
+                float off = fabsf(m->clock - beat);
+                m->cue_live = false;
+                mg_score_round(m, clampf(1.0f - off / 0.22f, 0.0f, 1.0f),
+                               off < 0.08f ? "ON BEAT!" : "GOOD");
+            }
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 static void perform_rest(void)
@@ -847,6 +1116,44 @@ static void finish_on_time(void)
         finish_battle(0, "Time! The match ends in a draw.");
 }
 
+/* Auto-battle: pick a move the Kilix can afford and reach (highest first). */
+static int player_preferred_move(void)
+{
+    BattleState *battle = &G.battle;
+    int best = -1;
+    for (int i = MOVE_COUNT - 1; i >= 0; --i) {
+        if (battle->player_guts + 0.001f < MOVES[i].cost)
+            continue;
+        if (move_in_range(&MOVES[i], battle->distance))
+            return i;
+        if (best < 0)
+            best = i;
+    }
+    return best;
+}
+
+static void player_think(float dt)
+{
+    BattleState *battle = &G.battle;
+    int move_index = player_preferred_move();
+    if (battle->player_cooldown > 0.0f || move_index < 0)
+        return;
+    if (battle->player_guts + 0.001f >= MOVES[move_index].cost
+        && move_in_range(&MOVES[move_index], battle->distance)) {
+        battle->selected_move = move_index;
+        enter_attack(true, move_index);
+        return;
+    }
+    /* Close toward the chosen move's band. */
+    float target = (MOVES[move_index].min_range + MOVES[move_index].max_range) * 0.005f;
+    if (battle->distance < target - 0.015f)
+        battle->distance += 0.34f * dt;
+    else if (battle->distance > target + 0.015f)
+        battle->distance -= 0.34f * dt;
+    battle->distance = clampf(battle->distance, 0.0f, 1.0f);
+    battle->selected_move = move_index;
+}
+
 static int enemy_preferred_move(void)
 {
     BattleState *battle = &G.battle;
@@ -949,7 +1256,15 @@ static void battle_tick(float dt)
             finish_on_time();
             return;
         }
-        enemy_think(dt);
+        if (battle->autopilot)
+            player_think(dt);
+        /* If the player just launched an attack this tick, its 0.34s
+         * PLAYER_ATTACK window owns the turn — skip the enemy so it can't
+         * clobber the player's strike (or land a posthumous free hit on a
+         * creature the player just KO'd). In manual play autopilot is off,
+         * so phase stays ACTIVE and the enemy thinks exactly as before. */
+        if (battle->phase == BATTLE_ACTIVE)
+            enemy_think(dt);
         return;
     }
 
@@ -1320,6 +1635,13 @@ static void handle_battle_key(int key)
             forfeit_battle();         /* mid-fight: Esc gives up the match */
         return;
     }
+    if (lower == 'v') {                    /* toggle auto-battle any time */
+        battle->autopilot = !battle->autopilot;
+        game_show_toast(battle->autopilot ? "Auto-battle ON - Kilix fights on its own."
+                                          : "Auto-battle OFF - you have the reins.");
+        play_sound(SFX_MOVE);
+        return;
+    }
     if (is_confirm_key(key) && battle->phase == BATTLE_READY) {
         battle->phase = BATTLE_ACTIVE;
         battle->intro_timer = 0.0f;
@@ -1436,6 +1758,9 @@ void game_handle_key(int key)
     case SCREEN_BATTLE:
         handle_battle_key(key);
         break;
+    case SCREEN_DRILL:
+        minigame_key(key);
+        break;
     case SCREEN_EVENT:
         if (is_confirm_key(key) || key == KEY_ESC)
             dismiss_event();
@@ -1474,6 +1799,8 @@ static void tick_step(float dt)
         G.event.timer = clampf(G.event.timer + dt, 0.0f, G.event.duration);
     else if (G.screen == SCREEN_BATTLE)
         battle_tick(dt);
+    else if (G.screen == SCREEN_DRILL)
+        minigame_tick(dt);
 }
 
 void game_tick(float dt)
@@ -1786,6 +2113,69 @@ static uint32_t scripted_growth(unsigned seed, int weeks, int *failures)
     return persistent_digest();
 }
 
+/* Headlessly play a drill's mini-game with either skilled or sloppy input and
+ * return the resulting quality [0,1]. Used by the selftest to prove every
+ * mini-game rewards skill and terminates. */
+static float drive_minigame(int drill, bool skilled)
+{
+    enter_drill(drill);
+    MinigameState *m = &G.minigame;
+    m->phase = 1;
+    m->clock = 0.0f;
+    m->round = 0;
+    m->quality = 0.0f;
+    mg_begin_round(m);
+    const float dt = 1.0f / 60.0f;
+    int guard = 0;
+    while (m->phase == 1 && guard++ < 200000) {
+        switch (m->type) {
+        case MG_TIMING: {
+            float mk = triangle_wave(m->clock * m->marker_vel);
+            if (skilled ? fabsf(mk - m->target) < 0.02f : m->clock > 0.05f)
+                minigame_key(KEY_ENTER);
+            else
+                minigame_tick(dt);
+            break;
+        }
+        case MG_REACTION:
+            if (skilled) {
+                if (m->cue_live) minigame_key(KEY_ENTER); else minigame_tick(dt);
+            } else {
+                if (!m->cue_live && m->clock > 0.1f) minigame_key(KEY_ENTER);
+                else minigame_tick(dt);
+            }
+            break;
+        case MG_MEMORY:
+            if (m->showing) minigame_tick(dt);
+            else minigame_key('1' + (skilled ? m->seq[m->seq_pos]
+                                             : ((m->seq[m->seq_pos] + 1) & 3)));
+            break;
+        case MG_MASH:
+            if (skilled) minigame_key(KEY_ENTER);
+            minigame_tick(dt);
+            break;
+        case MG_HOLD:
+            if (skilled && fabsf(m->marker - m->target) > 0.03f)
+                minigame_key(m->marker > m->target ? KEY_LEFT : KEY_RIGHT);
+            minigame_tick(dt);
+            break;
+        case MG_RHYTHM: {
+            /* Aim for the beat centre, not the moment the window opens. */
+            float beat = 0.9f + m->round * 0.72f;
+            if (skilled && m->cue_live && fabsf(m->clock - beat) < 0.03f)
+                minigame_key(KEY_ENTER);
+            else
+                minigame_tick(dt);
+            break;
+        }
+        default:
+            minigame_tick(dt);
+            break;
+        }
+    }
+    return m->phase == 2 ? m->quality : -1.0f;
+}
+
 int game_selftest(unsigned seed, int weeks)
 {
     GameState original = G;
@@ -2019,6 +2409,40 @@ int game_selftest(unsigned seed, int weeks)
         remove(tmp_sibling);
         remove(test_path);
         rmdir(test_dir);
+    }
+
+    /* Auto-battle fights and wins on its own with no manual input. */
+    {
+        for (i = 0; i < STAT_COUNT; ++i)
+            G.kilix.stats.value[i] = 400;
+        G.kilix.rank = 0;
+        G.kilix.fatigue = G.kilix.stress = 0;
+        G.screen = SCREEN_ARENA;
+        G.arena_cursor = 0;
+        game_start_battle(0);
+        SELFTEST_CHECK(G.screen == SCREEN_BATTLE, "auto-battle could not start");
+        G.battle.phase = BATTLE_ACTIVE;
+        G.battle.autopilot = true;
+        int guard = 0;
+        while (G.battle.phase != BATTLE_FINISHED && G.screen == SCREEN_BATTLE
+               && guard++ < 40000)
+            game_tick(TICK_DT);
+        SELFTEST_CHECK(G.battle.phase == BATTLE_FINISHED,
+                       "auto-battle did not resolve without input");
+        SELFTEST_CHECK(G.battle.winner > 0,
+                       "a strong Kilix on auto-battle should win");
+    }
+
+    /* Every drill mini-game must terminate and reward skill over sloppiness. */
+    for (int d = 0; d < DRILL_COUNT; d++) {
+        float skilled = drive_minigame(d, true);
+        float sloppy = drive_minigame(d, false);
+        SELFTEST_CHECK(skilled >= 0.0f && sloppy >= 0.0f,
+                       "a drill mini-game failed to terminate");
+        SELFTEST_CHECK(skilled > sloppy + 0.15f,
+                       "skilled drill play must clearly beat sloppy play");
+        SELFTEST_CHECK(skilled >= 0.5f,
+                       "a well-played drill should score at least half");
     }
 
     suppress_autosave = old_suppression;

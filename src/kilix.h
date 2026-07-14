@@ -20,6 +20,7 @@
 #define MOVE_COUNT 4
 #define OPPONENT_COUNT 6
 #define RANK_COUNT 6
+#define JOURNAL_PAGES 6   /* field-guide entries; matches JOURNAL_ENTRIES */
 
 enum {
     KEY_ENTER = 1000,
@@ -43,8 +44,49 @@ typedef enum {
     SCREEN_EVENT,
     SCREEN_JOURNAL,
     SCREEN_CREDITS,
-    SCREEN_CHAMPION
+    SCREEN_CHAMPION,
+    SCREEN_DRILL
 } Screen;
+
+/* One skill mini-game per drill, chosen by the drill's primary stat. */
+typedef enum {
+    MG_TIMING,     /* Power/Claw   — stop the sweep in the sweet spot */
+    MG_REACTION,   /* Speed/Agility — press the instant the cue flashes */
+    MG_MEMORY,     /* Skill/Focus  — repeat the ember sequence */
+    MG_MASH,       /* Intellect/Flame — mash to fill the flame gauge */
+    MG_HOLD,       /* Defense/Guard — keep the drifting marker centered */
+    MG_RHYTHM,     /* Life/Heart   — tap each beat on time */
+    MG_TYPE_COUNT
+} MinigameType;
+
+typedef struct {
+    int drill;                 /* which DRILLS[] entry */
+    MinigameType type;
+    int phase;                 /* 0 intro, 1 playing, 2 finished */
+    float clock;               /* seconds in the current phase */
+    int round;                 /* current round (0-based) */
+    int rounds;                /* rounds this game */
+    float quality;             /* accumulated performance in [0,1] */
+    float feedback;            /* hit/miss flash timer */
+
+    float marker;              /* timing/hold sweep position [0,1] */
+    float marker_vel;          /* sweep velocity/direction */
+    float target;              /* sweet-spot / hold center [0,1] */
+    float half;                /* sweet-spot / hold half-width */
+
+    float cue_at;              /* reaction: when the cue fires */
+    bool cue_live;             /* reaction/rhythm: window is open */
+
+    int seq[10];               /* memory: the shown sequence */
+    int seq_len;               /* memory: length this round */
+    int seq_pos;               /* memory: playback/input index */
+    bool showing;              /* memory: still displaying the sequence */
+
+    int taps;                  /* mash presses / rhythm hits */
+    int taps_target;           /* mash goal */
+
+    char banner[48];           /* per-round feedback text */
+} MinigameState;
 
 typedef enum {
     STAT_LIFE,
@@ -192,6 +234,7 @@ typedef struct {
     int last_damage;
     int winner;             /* -1 enemy, 0 draw/unset, 1 player */
     bool hit;
+    bool autopilot;         /* auto-battle: the Kilix fights on its own */
     char callout[96];
 } BattleState;
 
@@ -221,6 +264,7 @@ typedef struct {
     Monster kilix;
     EventState event;
     BattleState battle;
+    MinigameState minigame;
 
     char name_input[24];
     int name_len;

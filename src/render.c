@@ -16,9 +16,16 @@ static int output_height;
 static Bitmap ranch_background;
 static Bitmap arena_background;
 static Bitmap kilix_sprite;
+static Bitmap kilix_atlas;              /* 6-frame animation strip (optional) */
 static Bitmap opponent_sprites[OPPONENT_COUNT];
+static Bitmap opponent_atlas[OPPONENT_COUNT];   /* 6-frame rival strips (optional) */
 
-/* Rival sprite files, indexed by opponent id (matches OPPONENTS[] order). */
+/* Frame order inside kilix_atlas.ppm (and every rival atlas). */
+enum {
+    KF_IDLE, KF_WALK, KF_NAP, KF_CROUCH, KF_POUNCE, KF_HURT, KILIX_FRAMES
+};
+
+/* Rival sprite/atlas files, indexed by opponent id (matches OPPONENTS[]). */
 static const char *const OPPONENT_SPRITE_FILES[OPPONENT_COUNT] = {
     "opponents/mossnub.ppm",
     "opponents/dewdrop.ppm",
@@ -27,6 +34,38 @@ static const char *const OPPONENT_SPRITE_FILES[OPPONENT_COUNT] = {
     "opponents/moonmoth.ppm",
     "opponents/duskcub.ppm",
 };
+static const char *const OPPONENT_ATLAS_FILES[OPPONENT_COUNT] = {
+    "opponents/mossnub_atlas.ppm",
+    "opponents/dewdrop_atlas.ppm",
+    "opponents/mistwing_atlas.ppm",
+    "opponents/stonecalf_atlas.ppm",
+    "opponents/moonmoth_atlas.ppm",
+    "opponents/duskcub_atlas.ppm",
+};
+
+/* Care-basket item sprites (ITEMS[] order) and a journal-page backdrop; all
+ * optional, with procedural fallbacks. */
+static Bitmap care_sprites[ITEM_COUNT];
+static Bitmap journal_background;
+static const char *const CARE_SPRITE_FILES[ITEM_COUNT] = {
+    "care/stew.ppm", "care/brush.ppm", "care/tonic.ppm", "care/treat.ppm",
+};
+/* Drill emblem icons, chosen per drill by its primary stat. */
+static Bitmap drill_icons[STAT_COUNT];
+static const char *const DRILL_ICON_FILES[STAT_COUNT] = {
+    "icons/heart.ppm",    /* STAT_LIFE */
+    "icons/claw.ppm",     /* STAT_POWER */
+    "icons/flame.ppm",    /* STAT_INTELLECT */
+    "icons/guard.ppm",    /* STAT_DEFENSE */
+    "icons/agility.ppm",  /* STAT_SPEED */
+    "icons/focus.ppm",    /* STAT_SKILL */
+};
+/* Mini-game prop sprites (all optional; draw_drill falls back to procedural). */
+static Bitmap mg_board;          /* instruction signboard */
+static Bitmap mg_num[3];         /* countdown digits 1, 2, 3 */
+static Bitmap mg_flame;          /* mash gauge */
+static Bitmap mg_bell;           /* rhythm beat */
+static Bitmap mg_shelter;        /* hold marker */
 
 static const uint32_t INK = 0x241B1A;
 static const uint32_t CREAM = 0xFFF1C9;
@@ -274,23 +313,69 @@ static int text_width(const char *text, int scale)
     return (int)strlen(text) * 6 * scale - scale;
 }
 
+/* Generated hand-lettered display font: a monospace grayscale glyph atlas
+ * (assets/font.ppm). Each cell holds one glyph as luminance-on-magenta; the
+ * text colour multiplies the luminance, so one atlas serves every UI colour.
+ * Used for scale >= 2 where a detailed glyph reads well; the crisp 5x7 bitmap
+ * stays for tiny (scale 1) text and any glyph the atlas lacks. */
+static bool is_chroma(uint32_t color);   /* defined with the bitmap helpers */
+#define FONT_CELL_W 40
+#define FONT_CELL_H 56
+static Bitmap font_atlas;
+static const char FONT_ORDER[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?:'-/%+&;()";
+
+static int font_index(char c)
+{
+    if (c == '\0') return -1;                        /* don't match the NUL */
+    const char *f = strchr(FONT_ORDER, c);
+    return f ? (int)(f - FONT_ORDER) : -1;
+}
+
+static void draw_glyph_cell(int cell, int x, int y, int w, int h,
+                            uint32_t color, float alpha)
+{
+    int cells = font_atlas.w / FONT_CELL_W;
+    if (cell < 0 || cell >= cells || w <= 0 || h <= 0) return;
+    int base = cell * FONT_CELL_W;
+    int tr = (color >> 16) & 255, tg = (color >> 8) & 255, tb = color & 255;
+    for (int dy = 0; dy < h; dy++) {
+        int sy = dy * FONT_CELL_H / h;
+        if (sy >= font_atlas.h) sy = font_atlas.h - 1;   /* atlas may be short */
+        for (int dx = 0; dx < w; dx++) {
+            int sx = base + dx * FONT_CELL_W / w;
+            uint32_t p = font_atlas.px[sy * font_atlas.w + sx];
+            if (is_chroma(p)) continue;
+            int lum = p & 255;                       /* grayscale: any channel */
+            uint32_t c = (uint32_t)(tr * lum / 255) << 16 |
+                         (uint32_t)(tg * lum / 255) << 8 |
+                         (uint32_t)(tb * lum / 255);
+            pixel_blend(x + dx, y + dy, c, alpha);
+        }
+    }
+}
+
 static void draw_text(int x, int y, const char *text, uint32_t color,
                       float alpha, int scale)
 {
     int origin = x;
+    bool use_font = scale >= 2 && font_atlas.ok;
     for (const char *cursor = text; *cursor; cursor++) {
         if (*cursor == '\n') {
             y += 9 * scale;
             x = origin;
             continue;
         }
-        const uint8_t *rows = glyph_for(*cursor);
-        for (int gy = 0; gy < 7; gy++) {
-            for (int gx = 0; gx < 5; gx++) {
-                if (!(rows[gy] & (1 << (4 - gx)))) continue;
-                fill_rect(x + gx * scale, y + gy * scale,
-                          scale, scale, color, alpha);
-            }
+        int gi = use_font ? font_index(*cursor) : -1;
+        if (gi >= 0) {
+            draw_glyph_cell(gi, x, y, 5 * scale, 7 * scale, color, alpha);
+        } else {
+            const uint8_t *rows = glyph_for(*cursor);
+            for (int gy = 0; gy < 7; gy++)
+                for (int gx = 0; gx < 5; gx++)
+                    if (rows[gy] & (1 << (4 - gx)))
+                        fill_rect(x + gx * scale, y + gy * scale,
+                                  scale, scale, color, alpha);
         }
         x += 6 * scale;
     }
@@ -456,6 +541,47 @@ static void draw_bitmap_scaled(const Bitmap *bitmap, int x, int y,
     }
 }
 
+/* Blit one cell of a horizontal `frames`-cell atlas, scaled into (x,y,w,h). */
+static void draw_bitmap_atlas_frame(const Bitmap *bitmap, int frame, int frames,
+                                    int x, int y, int width, int height,
+                                    bool flip, uint32_t tint, float tint_amount,
+                                    float alpha)
+{
+    if (!bitmap->ok || width <= 0 || height <= 0 || frames <= 0) return;
+    int fw = bitmap->w / frames;
+    if (fw <= 0) return;
+    frame = clampi(frame, 0, frames - 1);
+    int base = frame * fw;
+    for (int dy = 0; dy < height; dy++) {
+        int sy = dy * bitmap->h / height;
+        for (int dx = 0; dx < width; dx++) {
+            int raw_x = dx * fw / width;
+            int sx = base + (flip ? fw - 1 - raw_x : raw_x);
+            uint32_t color = bitmap->px[sy * bitmap->w + sx];
+            if (is_chroma(color)) continue;
+            if (tint_amount > 0.0f)
+                color = color_mix(color, tint, tint_amount);
+            pixel_blend(x + dx, y + dy, color, alpha);
+        }
+    }
+}
+
+/* Map a draw pose (0 idle, 1 happy, 2 tired, 3 attack, 4 hit) to an atlas
+ * frame. Idle gently alternates idle/walk for life, or naps when exhausted;
+ * an attack crouches to wind up then pounces as the lunge extends. */
+static int kilix_anim_frame(int pose, float lunge)
+{
+    switch (pose) {
+    case 0: return G.kilix.fatigue > 78 ? KF_NAP
+                 : (((int)(G.time * 1.4f) & 1) ? KF_WALK : KF_IDLE);
+    case 1: return ((int)(G.time * 5.0f) & 1) ? KF_WALK : KF_IDLE;
+    case 2: return KF_NAP;
+    case 3: return fabsf(lunge) > 12.0f ? KF_POUNCE : KF_CROUCH;
+    case 4: return KF_HURT;
+    default: return KF_IDLE;
+    }
+}
+
 static void draw_ember(float x, float y, float phase, float size)
 {
     float pulse = 0.7f + 0.3f * sinf(phase);
@@ -588,8 +714,20 @@ static void draw_kilix(float anchor_x, float ground_y, float size, bool flip,
 
     fill_ellipse(anchor_x + facing_shift, ground_y + 3.0f,
                  size * 0.27f, size * 0.045f, 0x1A1715, 0.35f);
-    draw_bitmap_scaled(&kilix_sprite, x, y, width, height, flip,
-                       tint, tint_amount, 1.0f);
+    if (kilix_atlas.ok) {
+        /* Animated path: the atlas frame already carries the pose deformation,
+         * so draw at a neutral size and keep only the lunge shift, the idle bob
+         * and the hit flash. */
+        int fx = (int)(anchor_x - size * 0.5f + facing_shift);
+        int fy = (int)(ground_y - size + bob);
+        float flash = pose == 4 ? tint_amount : 0.0f;
+        draw_bitmap_atlas_frame(&kilix_atlas, kilix_anim_frame(pose, x_shift),
+                                KILIX_FRAMES, fx, fy, (int)size, (int)size,
+                                flip, tint, flash, 1.0f);
+    } else {
+        draw_bitmap_scaled(&kilix_sprite, x, y, width, height, flip,
+                           tint, tint_amount, 1.0f);
+    }
 
     for (int i = 0; i < 5; i++) {
         float phase = G.time * (2.0f + i * 0.12f) + i * 1.31f;
@@ -623,17 +761,24 @@ static void draw_opponent(int index, float anchor_x, float ground_y,
     fill_ellipse(x, ground_y + 4, size * 0.31f, size * 0.055f,
                  0x171513, 0.36f);
 
-    const Bitmap *sprite = &opponent_sprites[index];
-    if (sprite->ok) {
-        /* The rival plate is ground-anchored like the Kilix, so scaling the
-         * whole canvas to `size` lands its feet on the arena floor. The art
-         * already faces left toward the player, so no flip. */
-        int w = (int)(size * squash);
-        int h = (int)(size * stretch);
-        draw_bitmap_scaled(sprite, (int)(x - w * 0.5f), (int)(y - h),
-                           w, h, false, tint, tint_amount, 1.0f);
+    int w = (int)(size * squash);
+    int h = (int)(size * stretch);
+    int px = (int)(x - w * 0.5f), py = (int)(y - h);
+    /* Rival plates are ground-anchored like the Kilix, so scaling the whole
+     * canvas to `size` lands the feet on the arena floor; the art already
+     * faces left toward the player, so no flip. Prefer the animation atlas,
+     * fall back to the single plate, then to a colored blob. */
+    if (opponent_atlas[index].ok) {
+        int frame;
+        if (pose == 3)      frame = fabsf(lunge) > 12.0f ? KF_POUNCE : KF_CROUCH;
+        else if (pose == 4) frame = KF_HURT;
+        else                frame = ((int)(G.time * 1.2f) & 1) ? KF_WALK : KF_IDLE;
+        draw_bitmap_atlas_frame(&opponent_atlas[index], frame, KILIX_FRAMES,
+                                px, py, w, h, false, tint, tint_amount, 1.0f);
+    } else if (opponent_sprites[index].ok) {
+        draw_bitmap_scaled(&opponent_sprites[index], px, py, w, h, false,
+                           tint, tint_amount, 1.0f);
     } else {
-        /* Missing asset: a plain colored blob so the fight still reads. */
         fill_ellipse(x, y - size * 0.32f, size * 0.34f, size * 0.26f,
                      OPPONENTS[index].color, 1.0f);
     }
@@ -767,6 +912,16 @@ static void draw_ranch(void)
 static void draw_drill_icon(int index, float cx, float cy)
 {
     float pulse = 1.0f + sinf(G.time * 2.0f) * 0.03f;
+    /* Prefer a generated emblem (chosen by the drill's primary stat); fall back
+     * to the procedural icon below when the sprite is absent. */
+    int stat = clampi(DRILLS[clampi(index, 0, DRILL_COUNT - 1)].primary,
+                      0, STAT_COUNT - 1);
+    if (drill_icons[stat].ok) {
+        int s = (int)(96 * pulse);
+        draw_bitmap_scaled(&drill_icons[stat], (int)(cx - s / 2),
+                           (int)(cy - s / 2), s, s, false, 0xFFFFFF, 0.0f, 1.0f);
+        return;
+    }
     switch (index) {
     case 0:
         fill_rect((int)(cx - 64), (int)(cy + 24), 128, 12, 0x5C493B, 0.9f);
@@ -873,8 +1028,15 @@ static void draw_care(void)
     }
 
     panel(548, 75, 375, 395, 0x24353A, 0.9f);
-    draw_kilix(732, 405, 300, false, ranch_pose());
     int index = clampi(G.care_cursor, 0, ITEM_COUNT - 1);
+    draw_kilix(620, 430, 210, false, ranch_pose());
+    /* Show the selected treat as a sprite on its own little shelf. */
+    if (care_sprites[index].ok) {
+        rounded_rect(742, 118, 150, 150, 14, 0x101B20, 0.85f);
+        draw_bitmap_scaled(&care_sprites[index], 754, 128, 126, 126, false,
+                           0xFFFFFF, 0.0f, 1.0f);
+        draw_text_center(817, 250, ITEMS[index].name, GOLD, 0.72f, 1);
+    }
     rounded_rect(578, 352, 315, 87, 12, CREAM, 0.92f);
     char effects[160];
     snprintf(effects, sizeof effects,
@@ -1041,6 +1203,10 @@ static void draw_battle(void)
     float closeness = 1.0f - clampf(G.battle.distance, 0.0f, 1.0f);
     float player_x = 245.0f + closeness * 115.0f;
     float enemy_x = 715.0f - closeness * 115.0f;
+    /* Impact camera-shake: jitter the fighters and effects on a landed hit. */
+    float shk = G.battle.shake;
+    float sx = shk > 0.0f ? sinf(G.time * 88.0f) * shk * 20.0f : 0.0f;
+    float sy = shk > 0.0f ? cosf(G.time * 71.0f) * shk * 12.0f : 0.0f;
     int player_pose = G.battle.phase == BATTLE_PLAYER_ATTACK ? 3 :
                       G.battle.phase == BATTLE_ENEMY_ATTACK ? 4 :
                       G.battle.phase == BATTLE_FINISHED && G.battle.winner > 0 ? 1 :
@@ -1049,15 +1215,33 @@ static void draw_battle(void)
                      G.battle.phase == BATTLE_PLAYER_ATTACK ? 4 :
                      G.battle.phase == BATTLE_FINISHED && G.battle.winner < 0 ? 1 :
                      G.battle.phase == BATTLE_FINISHED ? 4 : 0;
-    draw_kilix(player_x, 395, 275, false, player_pose);
-    draw_opponent(G.battle.opponent, enemy_x, 390, 245, enemy_pose);
+    draw_kilix(player_x + sx, 395 + sy, 275, false, player_pose);
+    draw_opponent(G.battle.opponent, enemy_x + sx, 390 + sy, 245, enemy_pose);
 
     if ((G.battle.phase == BATTLE_PLAYER_ATTACK ||
          G.battle.phase == BATTLE_ENEMY_ATTACK) && G.battle.hit) {
-        float target_x = G.battle.phase == BATTLE_PLAYER_ATTACK ? enemy_x : player_x;
+        bool by_player = G.battle.phase == BATTLE_PLAYER_ATTACK;
+        float target_x = by_player ? enemy_x : player_x;
         float amount = sinf(clampf(G.battle.phase_timer * 9.0f, 0.0f, 3.14159f));
-        draw_flame_burst(target_x, 287, amount);
+        draw_flame_burst(target_x + sx, 287 + sy, amount);
+        if (G.battle.last_damage > 0) {           /* floating damage number */
+            float rise = (1.0f - clampf(G.battle.phase_timer / 0.38f, 0, 1)) * 48;
+            char dmg[16];
+            snprintf(dmg, sizeof dmg, "-%d", G.battle.last_damage);
+            draw_text_center((int)(target_x + sx), (int)(252 + sy - rise), dmg,
+                             by_player ? GOLD : CORAL, 1.5f, 3);
+        }
     }
+
+    /* Auto-battle badge (while active) and a persistent hint. */
+    if (G.battle.autopilot && G.battle.phase != BATTLE_READY &&
+        G.battle.phase != BATTLE_FINISHED) {
+        rounded_rect(LW / 2 - 58, 152, 116, 26, 8, 0x7A3B1E, 0.92f);
+        draw_text_center(LW / 2, 161, "AUTO-BATTLE", GOLD, 0.76f, 2);
+    }
+    draw_text(26, 158, G.battle.autopilot ? "[V] AUTO ON" : "[V] AUTO",
+              G.battle.autopilot ? GOLD : 0x8FA0A8, 0.72f, 1);
+
     if (G.battle.callout[0]) {
         rounded_rect(304, 105, 352, 41, 10, NIGHT, 0.84f);
         draw_text_center(480, 119, G.battle.callout,
@@ -1067,10 +1251,11 @@ static void draw_battle(void)
     draw_move_cards();
 
     if (G.battle.phase == BATTLE_READY) {
-        panel(315, 174, 330, 117, NIGHT, 0.95f);
-        draw_text_center(480, 194, "READY YOUR FLAME", GOLD, 1.0f, 2);
-        draw_text_center(480, 229, "BUILD WILL. MIND YOUR RANGE.", CREAM, 0.9f, 1);
-        draw_text_center(480, 251, "PRESS ENTER", 0x9ED5B7, 0.95f, 1);
+        panel(310, 168, 340, 138, NIGHT, 0.95f);
+        draw_text_center(480, 190, "READY YOUR FLAME", GOLD, 1.0f, 2);
+        draw_text_center(480, 223, "BUILD WILL. MIND YOUR RANGE.", CREAM, 0.88f, 1);
+        draw_text_center(480, 250, "PRESS ENTER TO FIGHT", 0x9ED5B7, 0.92f, 1);
+        draw_text_center(480, 274, "PRESS V FOR AUTO-BATTLE", 0xE0A45A, 0.82f, 1);
     } else if (G.battle.phase == BATTLE_FINISHED) {
         panel(306, 158, 348, 145, NIGHT, 0.96f);
         const char *result = G.battle.winner > 0 ? "VICTORY!" :
@@ -1105,12 +1290,18 @@ static void draw_event(void)
                       CREAM, 0.55f + i * 0.15f, 2 + i);
         }
     } else if (G.event.kind == EVENT_FEED) {
-        draw_kilix(690, 475, 335, false, 1);
-        fill_circle(828, 414, 42, 0xB66B3F, 1.0f);
-        fill_circle(828, 408, 34, CREAM, 1.0f);
-        for (int i = 0; i < 5; i++)
-            draw_ember(808 + i * 10, 406 + (i & 1) * 7,
-                       G.time * 3 + i, 2.5f);
+        draw_kilix(700, 475, 335, false, 1);
+        int ci = clampi(G.event.index, 0, ITEM_COUNT - 1);
+        float bob = sinf(G.time * 2.2f) * 6.0f;
+        if (care_sprites[ci].ok) {
+            draw_bitmap_scaled(&care_sprites[ci], 168, (int)(232 + bob),
+                               170, 170, false, 0xFFFFFF, 0.0f, 1.0f);
+        } else {
+            fill_circle(828, 414, 42, 0xB66B3F, 1.0f);
+            fill_circle(828, 408, 34, CREAM, 1.0f);
+        }
+        for (int i = 0; i < 4; i++)
+            draw_ember(250 + i * 12, 300 + (i & 1) * 8, G.time * 3 + i, 2.2f);
     } else {
         draw_kilix(315, 462, 285, false,
                    G.event.success || G.event.kind == EVENT_RANK_UP ? 1 : 2);
@@ -1145,74 +1336,76 @@ static void draw_event(void)
     draw_footer("ENTER  CONTINUE     ESC  SKIP");
 }
 
-static void draw_journal_card(int x, int y, int number, const char *title,
-                              const char *body, uint32_t color)
-{
-    rounded_rect(x, y, 250, 129, 12, color, 0.9f);
-    fill_circle(x + 30, y + 31, 17, GOLD, 0.95f);
-    char value[8];
-    snprintf(value, sizeof value, "%d", number);
-    draw_text_center(x + 30, y + 27, value, INK, 1.0f, 1);
-    draw_text(x + 57, y + 23, title, CREAM, 1.0f, 2);
-    draw_wrapped_text(x + 22, y + 61, 209, body, CREAM, 0.83f, 1, 4);
-}
+/* Field-guide entries. The count must equal JOURNAL_PAGES in game.c. */
+static const struct { const char *title; const char *body; } JOURNAL_ENTRIES[] = {
+    {"THE WEEKLY LIFE",
+     "Each choice on the ranch - a drill, a catnap, a shared treat, or a "
+     "festival match - moves the calendar one week. Forty-eight weeks make a "
+     "year. Plan each season around the rival you mean to face."},
+    {"CARE AND REST",
+     "Fatigue and stress quietly drain a drill's success and a fighter's edge. "
+     "A catnap sheds fatigue; the care basket eases stress, lifts form, and "
+     "deepens your bond. A rested Kilix learns faster and fights braver."},
+    {"THE SIX GIFTS",
+     "Heart, Claw, Flame, Guard, Agility, and Focus shape both training and "
+     "battle. Heart is stamina, Claw is power, Flame is spark, Guard softens "
+     "hits, Agility dodges, and Focus sharpens every strike."},
+    {"DRILL MINI-GAMES",
+     "Every drill is a small test of skill, and how well you play sets how "
+     "much your Kilix grows. Time the spark, react to the flare, repeat the "
+     "sequence, stoke the flame, hold steady, or tap the beat - skill beats luck."},
+    {"ARENA TACTICS",
+     "Will recharges in real time, so patience pays. Left and right change "
+     "range, and each move only works inside its band. Focus lifts accuracy, "
+     "Agility slips a blow, and Guard blunts the rest. At the bell, the greater "
+     "Heart percentage wins."},
+    {"ABOUT THE KILIX",
+     "Kilix are fire-kittens born where a kind hearth meets a wild spark. The "
+     "tail flame brightens with courage and dims when they need rest. No two "
+     "bonds burn the same - raise with patience and let personality lead."},
+};
+_Static_assert((int)(sizeof JOURNAL_ENTRIES / sizeof JOURNAL_ENTRIES[0])
+               == JOURNAL_PAGES, "JOURNAL_ENTRIES must match JOURNAL_PAGES");
 
 static void draw_journal(void)
 {
-    draw_bitmap_cover(&ranch_background, 0.53f);
-    panel(44, 49, 872, 438, 0x17282F, 0.96f);
-    draw_text(76, 76, "THE HEARTHKEEPER'S JOURNAL", GOLD, 1.0f, 3);
-    char page[32];
-    snprintf(page, sizeof page, "PAGE %d / 3", G.journal_page + 1);
-    draw_text_right(882, 84, page, CREAM, 0.72f, 1);
-    fill_rect(75, 113, 808, 2, ORANGE, 0.7f);
+    int sel = clampi(G.journal_page, 0, JOURNAL_PAGES - 1);
+    bool book = journal_background.ok;
+    uint32_t ink = book ? 0x2E2016 : CREAM;
+    uint32_t head = book ? 0x6A2F10 : GOLD;
 
-    if (G.journal_page == 0) {
-        draw_text(78, 135, "RAISING A KILIX", CREAM, 1.0f, 2);
-        draw_journal_card(78, 174, 1, "CHOOSE A WEEK",
-                          "DRILL, REST, SHARE FOOD, OR ENTER THE ARENA. MOST CHOICES ADVANCE THE CALENDAR.",
-                          0x24464A);
-        draw_journal_card(355, 174, 2, "WATCH THE FLAME",
-                          "FATIGUE AND STRESS LOWER SUCCESS. CATNAPS AND KIND CARE RESTORE YOUR PARTNER.",
-                          0x3A3E4B);
-        draw_journal_card(632, 174, 3, "BUILD A BOND",
-                          "A STRONG BOND MAKES DRILLS MORE RELIABLE AND HELPS KILIX FIGHT WITH CONFIDENCE.",
-                          0x4D3A35);
-        draw_journal_card(218, 322, 4, "SIX GIFTS",
-                          "HEART, CLAW, FLAME, GUARD, AGILITY, AND FOCUS EACH SHAPE TRAINING AND BATTLE.",
-                          0x314B3F);
-        draw_journal_card(495, 322, 5, "CLIMB THE LEAGUES",
-                          "DEFEAT EACH FESTIVAL RIVAL FROM KINDLING TO CROWN. THE FINAL FLAME AWAITS.",
-                          0x4C3535);
-    } else if (G.journal_page == 1) {
-        draw_text(78, 135, "ARENA TACTICS", CREAM, 1.0f, 2);
-        draw_journal_card(78, 174, 1, "BUILD WILL",
-                          "WILL RECHARGES IN REAL TIME. STRONGER MOVES COST MORE, SO PATIENCE CAN WIN A FIGHT.",
-                          0x24464A);
-        draw_journal_card(355, 174, 2, "MIND THE RANGE",
-                          "LEFT AND RIGHT CHANGE DISTANCE. EVERY MOVE ONLY WORKS INSIDE ITS SHOWN RANGE.",
-                          0x3A3E4B);
-        draw_journal_card(632, 174, 3, "READ THE ODDS",
-                          "FOCUS IMPROVES ACCURACY. AGILITY HELPS DODGE. GUARD SOFTENS EACH LANDED HIT.",
-                          0x4D3A35);
-        draw_journal_card(218, 322, 4, "CALL A MOVE",
-                          "PRESS 1-4 DIRECTLY, OR SELECT WITH UP AND DOWN THEN PRESS ENTER.",
-                          0x314B3F);
-        draw_journal_card(495, 322, 5, "THE BELL",
-                          "WHEN TIME ENDS, THE FIGHTER WITH THE GREATER HEART PERCENTAGE TAKES THE MATCH.",
-                          0x4C3535);
-    } else {
-        draw_text(78, 135, "THE KILIX WAY", CREAM, 1.0f, 2);
-        draw_kilix(255, 445, 290, false, 0);
-        draw_wrapped_text(400, 175, 430,
-                          "KILIX ARE FIRE KITTENS BORN WHERE A KIND HEARTH MEETS A WILD SPARK. THEIR TAIL FLAME BRIGHTENS WITH COURAGE AND DIMS WHEN THEY NEED REST.",
-                          CREAM, 0.95f, 2, 7);
-        draw_wrapped_text(400, 312, 430,
-                          "NO TWO BONDS BURN THE SAME. RAISE WITH PATIENCE, TRAIN WITH PURPOSE, AND LET YOUR PARTNER'S PERSONALITY SHAPE THE STORY.",
-                          0xBFD6BE, 0.88f, 1, 6);
-        draw_text(400, 410, "SPECIES  KILIX     AFFINITY  FIRE", GOLD, 0.95f, 1);
+    if (book)
+        draw_bitmap_cover(&journal_background, 0.05f);
+    else {
+        draw_bitmap_cover(&ranch_background, 0.55f);
+        panel(44, 49, 872, 438, 0x17282F, 0.95f);
     }
-    draw_footer("LEFT / RIGHT  TURN PAGE     ESC  RETURN");
+    /* The book's top spine is dark, so the guide title stays light. */
+    draw_text_center(LW / 2, 44, "THE HEARTHKEEPER'S FIELD GUIDE", GOLD, 1.0f, 3);
+
+    /* Left column: the browsable list of entries. */
+    for (int i = 0; i < JOURNAL_PAGES; i++) {
+        int y = 108 + i * 54;
+        bool on = i == sel;
+        if (on)
+            rounded_rect(66, y - 7, 300, 44, 9,
+                         book ? 0x8A4A22 : 0x2E4A50, book ? 0.72f : 0.9f);
+        draw_text(90, y + 4, JOURNAL_ENTRIES[i].title,
+                  on ? CREAM : (book ? 0x4A3220 : 0x9DB0B8),
+                  on ? 1.0f : 0.88f, on ? 2 : 1);
+    }
+
+    /* Right column: the selected entry. */
+    draw_text(420, 104, JOURNAL_ENTRIES[sel].title, head, 1.0f, 3);
+    fill_rect(420, 138, 440, 2, book ? 0x9A6B3A : ORANGE, 0.65f);
+    draw_wrapped_text(420, 162, 448, JOURNAL_ENTRIES[sel].body, ink, 0.95f, 2, 6);
+    if (sel == JOURNAL_PAGES - 1)          /* the lore page shows the Kilix */
+        draw_kilix(660, 495, 235, false, 0);
+
+    char pos[24];
+    snprintf(pos, sizeof pos, "%d / %d", sel + 1, JOURNAL_PAGES);
+    draw_text_right(884, 44, pos, ink, 0.75f, 1);
+    draw_footer("UP / DOWN  BROWSE     ESC  CLOSE");
 }
 
 static void draw_champion(void)
@@ -1298,6 +1491,7 @@ bool render_validate_assets(char *error, size_t error_length)
         {"backgrounds/ranch.ppm", 640, 360},
         {"backgrounds/arena.ppm", 640, 360},
         {"kilix.ppm", 384, 384},
+        {"kilix_atlas.ppm", 2304, 384},
         {"opponents/mossnub.ppm", 320, 320},
         {"opponents/dewdrop.ppm", 320, 320},
         {"opponents/mistwing.ppm", 320, 320},
@@ -1338,10 +1532,26 @@ bool render_init(int width, int height, char *error, size_t error_length)
         render_shutdown();
         return false;
     }
-    /* Rival plates are optional at load: draw_opponent falls back to a colored
-     * blob if one is missing, so a stripped install still runs. */
-    for (int i = 0; i < OPPONENT_COUNT; i++)
+    /* Optional at load (draw_kilix/draw_opponent fall back if missing), so a
+     * stripped install still runs. */
+    kilix_atlas = load_ppm(asset_path("kilix_atlas.ppm"));
+    for (int i = 0; i < OPPONENT_COUNT; i++) {
         opponent_sprites[i] = load_ppm(asset_path(OPPONENT_SPRITE_FILES[i]));
+        opponent_atlas[i] = load_ppm(asset_path(OPPONENT_ATLAS_FILES[i]));
+    }
+    for (int i = 0; i < ITEM_COUNT; i++)
+        care_sprites[i] = load_ppm(asset_path(CARE_SPRITE_FILES[i]));
+    for (int i = 0; i < STAT_COUNT; i++)
+        drill_icons[i] = load_ppm(asset_path(DRILL_ICON_FILES[i]));
+    journal_background = load_ppm(asset_path("journal.ppm"));
+    mg_board = load_ppm(asset_path("minigame/board.ppm"));
+    mg_num[0] = load_ppm(asset_path("minigame/num1.ppm"));
+    mg_num[1] = load_ppm(asset_path("minigame/num2.ppm"));
+    mg_num[2] = load_ppm(asset_path("minigame/num3.ppm"));
+    mg_flame = load_ppm(asset_path("minigame/flame.ppm"));
+    mg_bell = load_ppm(asset_path("minigame/bell.ppm"));
+    mg_shelter = load_ppm(asset_path("minigame/shelter.ppm"));
+    font_atlas = load_ppm(asset_path("font.ppm"));
     render_resize(width, height);
     if (!output) {
         snprintf(error, error_length, "could not allocate terminal framebuffer");
@@ -1372,8 +1582,239 @@ void render_shutdown(void)
     free_bitmap(&ranch_background);
     free_bitmap(&arena_background);
     free_bitmap(&kilix_sprite);
-    for (int i = 0; i < OPPONENT_COUNT; i++)
+    free_bitmap(&kilix_atlas);
+    for (int i = 0; i < OPPONENT_COUNT; i++) {
         free_bitmap(&opponent_sprites[i]);
+        free_bitmap(&opponent_atlas[i]);
+    }
+    for (int i = 0; i < ITEM_COUNT; i++)
+        free_bitmap(&care_sprites[i]);
+    for (int i = 0; i < STAT_COUNT; i++)
+        free_bitmap(&drill_icons[i]);
+    free_bitmap(&journal_background);
+    free_bitmap(&mg_board);
+    for (int i = 0; i < 3; i++)
+        free_bitmap(&mg_num[i]);
+    free_bitmap(&mg_flame);
+    free_bitmap(&mg_bell);
+    free_bitmap(&mg_shelter);
+    free_bitmap(&font_atlas);
+}
+
+static const char *drill_howto(MinigameType type)
+{
+    switch (type) {
+    case MG_TIMING:   return "STOP THE SPARK IN THE GLOWING BAND  -  SPACE";
+    case MG_REACTION: return "STRIKE THE MOMENT THE EMBER FLARES  -  SPACE";
+    case MG_MEMORY:   return "WATCH, THEN REPEAT THE SPARKS  -  KEYS 1-4";
+    case MG_MASH:     return "MASH SPACE TO STOKE THE FLAME!";
+    case MG_HOLD:     return "HOLD THE SHELTER STEADY  -  LEFT / RIGHT";
+    case MG_RHYTHM:   return "TAP EACH BEAT ON TIME  -  SPACE";
+    default:          return "";
+    }
+}
+
+/* A fuller, plainer explanation shown on the get-ready screen. */
+static const char *drill_detail(MinigameType type)
+{
+    switch (type) {
+    case MG_TIMING:
+        return "A spark sweeps the bar three times. Press SPACE to stop it - the "
+               "closer to the middle of the green band, the bigger the gain.";
+    case MG_REACTION:
+        return "Three times, wait for the ember to FLARE, then press SPACE as fast "
+               "as you can. Press before it flares and you lose the round.";
+    case MG_MEMORY:
+        return "The four sparks light up in an order. When they stop, press the "
+               "number keys 1-4 to repeat that order. It grows longer each round.";
+    case MG_MASH:
+        return "Hammer SPACE as fast as you can for a few seconds to fill the "
+               "flame gauge. The fuller the gauge, the greater the reward.";
+    case MG_HOLD:
+        return "The marker drifts on its own. Tap LEFT and RIGHT to keep it inside "
+               "the green band. You are scored on how long you stay centered.";
+    case MG_RHYTHM:
+        return "The ring flares on each of six beats. Tap SPACE right as it flares "
+               "- the closer to the beat, the better each hit scores.";
+    default:
+        return "";
+    }
+}
+
+/* Make the training Kilix react to how the round is going. */
+static int drill_kilix_pose(const MinigameState *m)
+{
+    if (m->phase == 2)
+        return m->quality >= 0.5f ? 1 : 2;          /* happy / worn out */
+    if (m->feedback > 0.25f) {
+        char c = m->banner[0];
+        bool missed = c == 'M' || c == 'T';          /* MISS / TOO... / TIME */
+        return missed ? 2 : 1;
+    }
+    if (m->type == MG_MASH && m->phase == 1)
+        return 1;                                    /* bouncing with effort */
+    return 0;                                        /* idle-walk */
+}
+
+/* Draw a whole sprite centered at (cx,cy) fitting a `size`-box, optional tint. */
+static void draw_sprite_at(const Bitmap *b, float cx, float cy, float size,
+                           uint32_t tint, float tint_amount)
+{
+    int s = (int)size;
+    if (s <= 0) return;
+    draw_bitmap_scaled(b, (int)(cx - s / 2.0f), (int)(cy - s / 2.0f), s, s,
+                       false, tint, tint_amount, 1.0f);
+}
+
+static void draw_drill(void)
+{
+    const MinigameState *m = &G.minigame;
+    int di = clampi(m->drill, 0, DRILL_COUNT - 1);
+    draw_bitmap_cover(&ranch_background, 0.42f);
+    fill_gradient(0, 0, LW, LH, 0x101C24, 0x1A1013, 0.28f);
+    draw_header(DRILLS[di].name);
+    draw_kilix(480, 306, 200, false, drill_kilix_pose(m));
+
+    if (m->phase == 0) {                          /* get-ready: read + countdown */
+        int n = clampi(3 - (int)(m->clock / 0.8f), 1, 3);
+        /* Sprite signboard behind the instructions (procedural panel if absent). */
+        bool board = mg_board.ok;
+        if (board)
+            draw_sprite_at(&mg_board, LW / 2, 232, 560, 0xFFFFFF, 0.0f);
+        else
+            panel(LW / 2 - 260, 132, 520, 210, NIGHT, 0.93f);
+        uint32_t htxt = board ? 0x7A2F10 : GOLD;
+        uint32_t btxt = board ? 0x4A3420 : 0x9DD7BE;
+        draw_text_center(LW / 2, 150, DRILLS[di].name, htxt, 0.95f, 3);
+        draw_text_center(LW / 2, 188, drill_howto(m->type), board ? 0x3A2416 : CREAM,
+                         0.84f, 2);
+        draw_wrapped_text(LW / 2 - 205, 218, 410, drill_detail(m->type),
+                          btxt, 0.78f, 1, 3);
+        /* Countdown numeral as an animated fire sprite (pops in, settles). */
+        float pop = 1.0f - fmodf(m->clock, 0.8f) / 0.8f;         /* 1 -> 0 */
+        float scale = 96.0f + pop * 44.0f;
+        if (mg_num[n - 1].ok)
+            draw_sprite_at(&mg_num[n - 1], LW / 2, 400, scale, 0xFFFFFF, 0.0f);
+        else {
+            char num[8]; snprintf(num, sizeof num, "%d", n);
+            draw_text_center(LW / 2, 388, num, ORANGE, 1.4f, 3);
+        }
+        return;
+    }
+    if (m->phase == 2) {                          /* result */
+        char pct[32];
+        snprintf(pct, sizeof pct, "PERFORMANCE  %d%%",
+                 (int)(m->quality * 100.0f + 0.5f));
+        panel(LW / 2 - 240, 150, 480, 170, NIGHT, 0.93f);
+        draw_text_center(LW / 2, 182, m->banner, GOLD, 1.5f, 3);
+        draw_text_center(LW / 2, 224, pct, CREAM, 1.0f, 2);
+        draw_progress_bar(LW / 2 - 150, 250, 300, 20, m->quality, 1.0f,
+                          0x6AC18D, "");
+        draw_text_center(LW / 2, 290, "PRESS ENTER", 0x9DD7BE, 0.9f, 1);
+        return;
+    }
+
+    /* phase 1: the live game */
+    draw_text_center(LW / 2, 66, drill_howto(m->type), CREAM, 0.9f, 1);
+    if (m->rounds > 1) {
+        char rr[48];
+        snprintf(rr, sizeof rr, "ROUND %d / %d", m->round + 1, m->rounds);
+        draw_text_center(LW / 2, 92, rr, GOLD, 0.85f, 1);
+    }
+    if (m->feedback > 0.0f)
+        draw_text_center(LW / 2, 342, m->banner, ORANGE, 1.3f, 3);
+
+    float glow = 1.0f + sinf(G.time * 8.0f) * 0.08f;   /* gentle idle pulse */
+    int bx = LW / 2 - 300, by = 430, bw = 600, bh = 30;
+    switch (m->type) {
+    case MG_TIMING: {                                  /* flame sweeps the bar */
+        rounded_rect(bx, by, bw, bh, 8, 0x101A1F, 0.9f);
+        int zx = bx + (int)((m->target - m->half) * bw);
+        fill_rect(zx, by + 3, (int)(m->half * 2 * bw), bh - 6, 0x2E7D5B, 0.85f);
+        float mx = bx + m->marker * bw;
+        if (mg_flame.ok)
+            draw_sprite_at(&mg_flame, mx, by - 4, 64 * glow, 0xFFFFFF, 0.0f);
+        else
+            fill_rect((int)mx - 3, by - 7, 6, bh + 14, GOLD, 1.0f);
+        break;
+    }
+    case MG_REACTION:                                  /* flame flares on cue */
+        if (m->cue_live) {
+            float f = 190.0f + sinf(G.time * 30.0f) * 18.0f;
+            if (mg_flame.ok) draw_sprite_at(&mg_flame, LW / 2, 452, f, 0xFFFFFF, 0.0f);
+            else fill_circle(LW / 2, 420, 70, CORAL, 0.8f);
+            draw_text_center(LW / 2, 300, "NOW!", 0xFFFFFF, 1.4f, 3);
+        } else {
+            if (mg_flame.ok)
+                draw_sprite_at(&mg_flame, LW / 2, 440, 60, 0x55606A, 0.5f);
+            draw_text_center(LW / 2, 300, "WAIT...", 0x9DB0B8, 1.1f, 2);
+        }
+        break;
+    case MG_MEMORY: {                                  /* four glowing spark buttons */
+        static const uint32_t cols[4] = {0xF2532E, 0xF6C453, 0x6AC18D, 0x7AA9C9};
+        int active = m->showing ? (int)(m->clock / 0.55f) : -1;
+        int lit = (active >= 0 && active < m->seq_len) ? m->seq[active] : -1;
+        for (int i = 0; i < 4; i++) {
+            int cx = LW / 2 - 165 + i * 110;
+            bool on = lit == i;
+            fill_circle(cx, 430, on ? 46 : 33, cols[i], on ? 1.0f : 0.55f);
+            fill_circle(cx, 430, on ? 46 : 33, 0xFFFFFF, on ? 0.28f : 0.0f);
+            char lab[4]; snprintf(lab, sizeof lab, "%d", i + 1);
+            draw_text_center(cx, 422, lab, INK, 1.0f, 2);
+        }
+        if (!m->showing)
+            for (int i = 0; i < m->seq_len; i++) {
+                int cx = LW / 2 - (m->seq_len - 1) * 10 + i * 20;
+                fill_circle(cx, 490, 6, i < m->seq_pos ? GOLD : 0x33444A, 1.0f);
+            }
+        break;
+    }
+    case MG_MASH: {                                    /* flame grows with taps */
+        float frac = clampf((float)m->taps /
+                            (m->taps_target > 0 ? m->taps_target : 1), 0, 1);
+        char t[16];
+        snprintf(t, sizeof t, "%.1fs", clampf(4.0f - m->clock, 0, 4));
+        draw_text_center(LW / 2, 470, t, GOLD, 1.0f, 2);
+        if (mg_flame.ok) {
+            float fs = (80.0f + frac * 210.0f) * (1.0f + sinf(G.time * 18.0f) * 0.05f);
+            draw_sprite_at(&mg_flame, LW / 2, 452 - fs * 0.28f, fs, 0xFFFFFF, 0.0f);
+        } else {
+            draw_progress_bar(bx, by, bw, bh, frac, 1.0f, ORANGE, "FLAME");
+        }
+        break;
+    }
+    case MG_HOLD: {                                    /* shelter marker drifts */
+        rounded_rect(bx, by, bw, bh, 8, 0x101A1F, 0.9f);
+        int zx = bx + (int)((m->target - m->half) * bw);
+        fill_rect(zx, by + 3, (int)(m->half * 2 * bw), bh - 6, 0x2E7D5B, 0.8f);
+        bool inzone = fabsf(m->marker - m->target) < m->half;
+        float mx = bx + m->marker * bw;
+        if (mg_shelter.ok)
+            draw_sprite_at(&mg_shelter, mx, by - 6, 82, inzone ? 0xFFFFFF : CORAL,
+                           inzone ? 0.0f : 0.35f);
+        else
+            fill_rect((int)mx - 4, by - 7, 8, bh + 14, inzone ? GOLD : CORAL, 1.0f);
+        char t[16]; snprintf(t, sizeof t, "%.1fs", clampf(5.0f - m->clock, 0, 5));
+        draw_text_center(LW / 2, 470, t, GOLD, 1.0f, 2);
+        break;
+    }
+    case MG_RHYTHM: {                                  /* bell rings on the beat */
+        float sz = m->cue_live ? 130.0f + sinf(G.time * 40.0f) * 12.0f : 84.0f;
+        if (mg_bell.ok)
+            draw_sprite_at(&mg_bell, LW / 2, 418, sz,
+                           m->cue_live ? 0xFFFFFF : 0x6A7078, m->cue_live ? 0.0f : 0.4f);
+        else
+            fill_circle(LW / 2, 418, m->cue_live ? 30 : 22,
+                        m->cue_live ? GOLD : 0x33444A, m->cue_live ? 1.0f : 0.5f);
+        for (int i = 0; i < m->rounds; i++) {
+            int cx = LW / 2 - (m->rounds - 1) * 15 + i * 30;
+            fill_circle(cx, 492, 6, i < m->round ? GOLD : 0x33444A, 1.0f);
+        }
+        break;
+    }
+    default:
+        break;
+    }
 }
 
 void render_frame(void)
@@ -1387,6 +1828,7 @@ void render_frame(void)
     case SCREEN_CARE: draw_care(); break;
     case SCREEN_ARENA: draw_arena(); break;
     case SCREEN_BATTLE: draw_battle(); break;
+    case SCREEN_DRILL: draw_drill(); break;
     case SCREEN_EVENT: draw_event(); break;
     case SCREEN_JOURNAL:
     case SCREEN_CREDITS: draw_journal(); break;

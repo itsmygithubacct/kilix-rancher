@@ -258,13 +258,47 @@ static int render_test(const char *directory, unsigned seed)
     G.kilix.total_wins = 12;
     failures += !dump_named(directory, "render_12_champion.ppm");
 
+    /* One snapshot of each drill mini-game, mid-play. */
+    G.screen = SCREEN_DRILL;
+    G.screen_time = 1.0f;
+    struct { MinigameType type; int rounds; const char *file; } drills[] = {
+        {MG_TIMING,   3, "render_13_drill_timing.ppm"},
+        {MG_REACTION, 3, "render_14_drill_reaction.ppm"},
+        {MG_MEMORY,   3, "render_15_drill_memory.ppm"},
+        {MG_MASH,     1, "render_16_drill_mash.ppm"},
+        {MG_HOLD,     1, "render_17_drill_hold.ppm"},
+        {MG_RHYTHM,   6, "render_18_drill_rhythm.ppm"},
+    };
+    for (size_t i = 0; i < sizeof drills / sizeof drills[0]; i++) {
+        memset(&G.minigame, 0, sizeof G.minigame);
+        G.minigame.phase = 1;
+        G.minigame.type = drills[i].type;
+        G.minigame.rounds = drills[i].rounds;
+        G.minigame.round = 1;
+        G.minigame.clock = 0.6f;
+        G.minigame.marker = 0.56f;
+        G.minigame.target = 0.5f;
+        G.minigame.half = 0.14f;
+        G.minigame.cue_live = true;
+        G.minigame.showing = drills[i].type == MG_MEMORY;
+        G.minigame.seq_len = 4;
+        G.minigame.seq[0] = 0; G.minigame.seq[1] = 2;
+        G.minigame.seq[2] = 1; G.minigame.seq[3] = 3;
+        G.minigame.seq_pos = 2;
+        G.minigame.taps = 13;
+        G.minigame.taps_target = 26;
+        G.minigame.feedback = 0.4f;
+        snprintf(G.minigame.banner, sizeof G.minigame.banner, "GOOD");
+        failures += !dump_named(directory, drills[i].file);
+    }
+
     render_shutdown();
     unlink(temporary_save);
     if (failures) {
         fprintf(stderr, "render-test: %d snapshot(s) failed\n", failures);
         return 1;
     }
-    printf("PASS: wrote 12 visual snapshots to %s\n", directory);
+    printf("PASS: wrote 18 visual snapshots to %s\n", directory);
     return 0;
 }
 

@@ -12,12 +12,18 @@ assets from *Monster Rancher* or another commercial game are included.
 | `assets/backgrounds/ranch.ppm` | Original ranch environment generated with OpenAI's built-in image-generation tool | Center-cropped and normalized to binary 640×360 PPM |
 | `assets/backgrounds/arena.ppm` | Original arena environment generated with OpenAI's built-in image-generation tool | Center-cropped and normalized to binary 640×360 PPM |
 | `assets/opponents/*.ppm` | Six original rival monsters (Mossnub, Dewdrop, Mistwing, Stonecalf, Moonmoth, Duskcub) generated with the local Gemini image tool (`gemini-3-pro-image`) | Each rendered on a flat chroma-key background, keyed to alpha, trimmed, ground-anchored and scaled into a 320×320 canvas, then flattened over runtime magenta into binary P6 PPM |
+| `assets/kilix_atlas.ppm`, `assets/opponents/*_atlas.ppm` | Six-frame animation strips (idle, walk, nap, crouch, pounce, hurt) for the Kilix and every rival | Each pose generated with the creature's base sprite as an `--input` reference (so the character stays consistent), then keyed, trimmed, packed at one shared scale and ground-anchored by `build_atlas.py` into a magenta P6 strip the renderer slices per frame |
+| `assets/care/*.ppm` | The four care-basket items (stew, brush, tonic, treat) | Chroma-keyed, trimmed, center-anchored 256×256 magenta P6 item sprites |
+| `assets/icons/*.ppm` | Six drill emblem icons (chosen per drill by primary stat) | Chroma-keyed, center-anchored 192×192 magenta P6 emblems; `draw_drill_icon` falls back to procedural art when absent |
+| `assets/journal.ppm` | The field-guide book/parchment backdrop | Opaque 640×360 P6 background (no keying); the journal draws its browsable text over it |
+| `assets/minigame/*.ppm` | Mini-game props: a signal board, three round countdown numerals, and the flame, bell, and shelter icons the drills act on | Chroma-keyed, trimmed, center-anchored magenta P6 sprites; each drill falls back to procedural shapes when its sprite is absent |
+| `assets/font.ppm` | Hand-lettered display font — a 76-glyph monospace atlas (`A-Z a-z 0-9 . , ! ? : ' - / % + & ; ( )`) | Three generated glyph sheets (uppercase, lowercase, digits+punctuation) on flat magenta, sliced into cells by connected components with `font_atlas.py` and packed as GRAYSCALE-on-magenta; the renderer keys the magenta and multiplies each glyph's luminance by the requested text colour, so one atlas serves every UI colour. Used for text at scale ≥ 2; a built-in 5×7 bitmap covers tiny text and any glyph the atlas lacks |
 
 This repository ships **only runtime assets**. The lossless generation sources,
-intermediates, and the `process_sprite.py` conversion script are kept out of the
-game tree under `<workspace>/kilix-rancher/` (see its `README.md`). The full
-recipe — model, prompts, chroma-key choice, and renderer contract — is at
-`<workspace>/image_generation.md`.
+intermediates, and the `process_sprite.py` / `build_atlas.py` / `font_atlas.py`
+build scripts are kept out of the game tree under `<workspace>/kilix-rancher/`
+(see its `README.md`). The full recipe — model, prompts, chroma-key choice, and
+renderer contract — is at `<workspace>/image_generation.md`.
 
 ### Rival monster generation
 

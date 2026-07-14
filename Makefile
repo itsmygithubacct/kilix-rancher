@@ -15,8 +15,8 @@ DEP = $(OBJ:.o=.d)
 PREFIX ?= /usr/local
 DESTDIR ?=
 ASSET_DEST = $(DESTDIR)$(PREFIX)/share/kilix-rancher/assets
-IMAGE_ASSETS = assets/kilix.ppm assets/backgrounds/ranch.ppm \
-	assets/backgrounds/arena.ppm \
+IMAGE_ASSETS = assets/kilix.ppm assets/kilix_atlas.ppm \
+	assets/backgrounds/ranch.ppm assets/backgrounds/arena.ppm \
 	assets/opponents/mossnub.ppm assets/opponents/dewdrop.ppm \
 	assets/opponents/mistwing.ppm assets/opponents/stonecalf.ppm \
 	assets/opponents/moonmoth.ppm assets/opponents/duskcub.ppm
@@ -55,7 +55,7 @@ test: $(BIN) validate-assets
 	trap 'rm -rf "$$render_dir"' EXIT HUP INT TERM; \
 	./$(BIN) --render-test "$$render_dir" 1337; \
 	set -- "$$render_dir"/render_*.ppm; \
-	test "$$#" -eq 12; \
+	test "$$#" -eq 18; \
 	for image do test -s "$$image"; done
 
 audio:
@@ -64,10 +64,15 @@ audio:
 install: $(BIN) validate-assets
 	install -Dm755 $(BIN) "$(DESTDIR)$(PREFIX)/bin/$(BIN)"
 	install -d -m755 "$(ASSET_DEST)" "$(ASSET_DEST)/backgrounds" \
-		"$(ASSET_DEST)/opponents" "$(ASSET_DEST)/sfx"
-	install -m644 assets/kilix.ppm "$(ASSET_DEST)/"
+		"$(ASSET_DEST)/opponents" "$(ASSET_DEST)/care" \
+		"$(ASSET_DEST)/icons" "$(ASSET_DEST)/minigame" "$(ASSET_DEST)/sfx"
+	install -m644 assets/kilix.ppm assets/kilix_atlas.ppm assets/journal.ppm assets/font.ppm \
+		"$(ASSET_DEST)/"
 	install -m644 assets/backgrounds/*.ppm "$(ASSET_DEST)/backgrounds/"
 	install -m644 assets/opponents/*.ppm "$(ASSET_DEST)/opponents/"
+	install -m644 assets/care/*.ppm "$(ASSET_DEST)/care/"
+	install -m644 assets/icons/*.ppm "$(ASSET_DEST)/icons/"
+	install -m644 assets/minigame/*.ppm "$(ASSET_DEST)/minigame/"
 	install -m644 $(SFX_ASSETS) "$(ASSET_DEST)/sfx/"
 
 uninstall:
