@@ -1,0 +1,300 @@
+/*
+ * Kilix Rancher - an original creature-raising game for Kitty terminals.
+ *
+ * The presentation layer is inspired by the software-framebuffer structure
+ * used by Chess Bash.  Game rules, characters, writing and visual assets are
+ * original to this project.
+ */
+#ifndef KILIX_H
+#define KILIX_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#define TICK_DT (1.0f / 60.0f)
+#define STAT_COUNT 6
+#define DRILL_COUNT 6
+#define ITEM_COUNT 4
+#define MOVE_COUNT 4
+#define OPPONENT_COUNT 6
+#define RANK_COUNT 6
+
+enum {
+    KEY_ENTER = 1000,
+    KEY_BACKSPACE,
+    KEY_TAB,
+    KEY_ESC,
+    KEY_UP,
+    KEY_DOWN,
+    KEY_RIGHT,
+    KEY_LEFT
+};
+
+typedef enum {
+    SCREEN_TITLE,
+    SCREEN_NAMING,
+    SCREEN_RANCH,
+    SCREEN_TRAINING,
+    SCREEN_CARE,
+    SCREEN_ARENA,
+    SCREEN_BATTLE,
+    SCREEN_EVENT,
+    SCREEN_JOURNAL,
+    SCREEN_CREDITS,
+    SCREEN_CHAMPION
+} Screen;
+
+typedef enum {
+    STAT_LIFE,
+    STAT_POWER,
+    STAT_INTELLECT,
+    STAT_DEFENSE,
+    STAT_SPEED,
+    STAT_SKILL
+} StatKind;
+
+typedef enum {
+    SEASON_BLOOM,
+    SEASON_SUN,
+    SEASON_HARVEST,
+    SEASON_FROST
+} Season;
+
+typedef enum {
+    EVENT_NONE,
+    EVENT_TRAIN,
+    EVENT_REST,
+    EVENT_FEED,
+    EVENT_BATTLE_RESULT,
+    EVENT_RANK_UP
+} EventKind;
+
+typedef enum {
+    BATTLE_READY,
+    BATTLE_ACTIVE,
+    BATTLE_PLAYER_ATTACK,
+    BATTLE_ENEMY_ATTACK,
+    BATTLE_FINISHED
+} BattlePhase;
+
+typedef enum {
+    SFX_MOVE,
+    SFX_CONFIRM,
+    SFX_TRAIN,
+    SFX_HIT,
+    SFX_WIN,
+    SFX_LOSE,
+    SFX_COUNT
+} SoundId;
+
+typedef struct {
+    int value[STAT_COUNT];
+} Stats;
+
+typedef struct {
+    char name[24];
+    Stats stats;
+    int fatigue;
+    int stress;
+    int bond;
+    int form;
+    int age_weeks;
+    int rank;
+    int rank_wins;
+    int total_wins;
+    int total_losses;
+    unsigned personality_seed;
+} Monster;
+
+typedef struct {
+    const char *name;
+    const char *subtitle;
+    const char *description;
+    StatKind primary;
+    StatKind secondary;
+    int min_gain;
+    int max_gain;
+    int fatigue;
+    int stress;
+    int success;
+} DrillInfo;
+
+typedef struct {
+    const char *name;
+    const char *description;
+    int cost;
+    int fatigue;
+    int stress;
+    int bond;
+    int form;
+} ItemInfo;
+
+typedef struct {
+    const char *name;
+    const char *description;
+    int cost;
+    int power;
+    int accuracy;
+    float min_range;
+    float max_range;
+    StatKind scaling;
+} MoveInfo;
+
+typedef struct {
+    const char *name;
+    const char *species;
+    const char *epithet;
+    uint32_t color;
+    uint32_t accent;
+    int rank;
+    Stats stats;
+    int guts_rate;
+    int prize;
+} OpponentInfo;
+
+typedef struct {
+    EventKind kind;
+    float timer;
+    float duration;
+    int index;
+    bool success;
+    bool great;
+    StatKind primary;
+    StatKind secondary;
+    int gain_primary;
+    int gain_secondary;
+    int money_delta;
+    char title[64];
+    char detail[192];
+} EventState;
+
+typedef struct {
+    BattlePhase phase;
+    int opponent;
+    float timer;
+    float intro_timer;
+    float player_hp;
+    float enemy_hp;
+    float player_max_hp;
+    float enemy_max_hp;
+    float player_guts;
+    float enemy_guts;
+    float distance;
+    float player_cooldown;
+    float enemy_cooldown;
+    float phase_timer;
+    float shake;
+    float flash;
+    int selected_move;
+    int active_move;
+    int last_damage;
+    int winner;             /* -1 enemy, 0 draw/unset, 1 player */
+    bool hit;
+    char callout[96];
+} BattleState;
+
+typedef struct {
+    int screen;
+    int previous_screen;
+    int W, H;
+    bool quit;
+    bool headless;
+
+    int cursor;
+    int title_cursor;
+    int drill_cursor;
+    int care_cursor;
+    int arena_cursor;
+    int journal_page;
+
+    float time;
+    float screen_time;
+    float toast_timer;
+    float autosave_flash;
+    float ambient_phase;
+    unsigned rng;
+
+    int total_weeks;
+    int money;
+    Monster kilix;
+    EventState event;
+    BattleState battle;
+
+    char name_input[24];
+    int name_len;
+    char toast[160];
+    char save_path[512];
+    bool save_exists;
+    bool first_visit;
+    bool sound_on;
+    bool pending_overwrite;   /* naming screen: awaiting confirm to replace a save */
+    bool save_failed;         /* last save attempt failed: show a sticky warning */
+} GameState;
+
+typedef struct {
+    int w, h;
+    uint32_t *px;
+    bool ok;
+} Bitmap;
+
+extern GameState G;
+extern const DrillInfo DRILLS[DRILL_COUNT];
+extern const ItemInfo ITEMS[ITEM_COUNT];
+extern const MoveInfo MOVES[MOVE_COUNT];
+extern const OpponentInfo OPPONENTS[OPPONENT_COUNT];
+extern const char *RANK_NAMES[RANK_COUNT];
+extern const char *STAT_NAMES[STAT_COUNT];
+
+/* Utility and asset paths. */
+float clampf(float value, float low, float high);
+int clampi(int value, int low, int high);
+unsigned rng_next(void);
+int rng_range(int low, int high);
+void asset_paths_init(void);
+const char *asset_path(const char *relative);
+
+/* Game simulation. */
+void game_init(unsigned seed, bool fresh);
+void game_tick(float dt);
+void game_handle_key(int key);
+void game_new_ranch(const char *name);
+void game_go_ranch(void);
+void game_start_battle(int opponent);
+void game_use_move(int move_index);
+void game_show_toast(const char *message);
+void game_advance_week(void);
+bool game_save(void);
+bool game_load(void);
+bool game_delete_save(void);
+int game_selftest(unsigned seed, int weeks);
+Season game_season(void);
+const char *game_season_name(void);
+const char *game_condition(void);
+int game_year(void);
+int game_week_of_year(void);
+int game_overall_rating(void);
+
+/* Software renderer. */
+bool render_init(int width, int height, char *error, size_t error_len);
+void render_resize(int width, int height);
+void render_shutdown(void);
+void render_frame(void);
+const uint8_t *render_fb(void);
+bool render_dump_ppm(const char *path);
+bool render_validate_assets(char *error, size_t error_len);
+
+/* Terminal and audio platform layers. */
+bool term_init(int *out_width, int *out_height);
+bool term_check_resize(int *out_width, int *out_height);
+void term_present(const uint8_t *rgba, int width, int height);
+int term_poll_key(void);
+void term_shutdown(void);
+void term_emergency_restore(void);
+
+bool sound_init(void);
+void sound_play(SoundId id);
+void sound_shutdown(void);
+
+#endif

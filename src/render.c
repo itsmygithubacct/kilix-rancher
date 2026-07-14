@@ -1,0 +1,1423 @@
+#include "kilix.h"
+
+#include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define LW 960
+#define LH 540
+
+static uint8_t *canvas;
+static uint8_t *output;
+static int output_width;
+static int output_height;
+static Bitmap ranch_background;
+static Bitmap arena_background;
+static Bitmap kilix_sprite;
+static Bitmap opponent_sprites[OPPONENT_COUNT];
+
+/* Rival sprite files, indexed by opponent id (matches OPPONENTS[] order). */
+static const char *const OPPONENT_SPRITE_FILES[OPPONENT_COUNT] = {
+    "opponents/mossnub.ppm",
+    "opponents/dewdrop.ppm",
+    "opponents/mistwing.ppm",
+    "opponents/stonecalf.ppm",
+    "opponents/moonmoth.ppm",
+    "opponents/duskcub.ppm",
+};
+
+static const uint32_t INK = 0x241B1A;
+static const uint32_t CREAM = 0xFFF1C9;
+static const uint32_t GOLD = 0xF6C453;
+static const uint32_t ORANGE = 0xF26A2E;
+static const uint32_t CORAL = 0xE94D3D;
+static const uint32_t NIGHT = 0x182B3A;
+
+const uint8_t *render_fb(void)
+{
+    return output;
+}
+
+static float smoothstep(float edge0, float edge1, float value)
+{
+    float t = clampf((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static uint32_t color_mix(uint32_t a, uint32_t b, float t)
+{
+    t = clampf(t, 0.0f, 1.0f);
+    int ar = (a >> 16) & 255;
+    int ag = (a >> 8) & 255;
+    int ab = a & 255;
+    int br = (b >> 16) & 255;
+    int bg = (b >> 8) & 255;
+    int bb = b & 255;
+    int r = ar + (int)((br - ar) * t);
+    int g = ag + (int)((bg - ag) * t);
+    int bl = ab + (int)((bb - ab) * t);
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)bl;
+}
+
+static void pixel_set(int x, int y, uint32_t color)
+{
+    if (x < 0 || x >= LW || y < 0 || y >= LH) return;
+    uint8_t *pixel = canvas + ((size_t)y * LW + x) * 4;
+    pixel[0] = (color >> 16) & 255;
+    pixel[1] = (color >> 8) & 255;
+    pixel[2] = color & 255;
+    pixel[3] = 255;
+}
+
+static void pixel_blend(int x, int y, uint32_t color, float alpha)
+{
+    if (x < 0 || x >= LW || y < 0 || y >= LH) return;
+    int amount = (int)(clampf(alpha, 0.0f, 1.0f) * 256.0f + 0.5f);
+    if (amount <= 0) return;
+    uint8_t *pixel = canvas + ((size_t)y * LW + x) * 4;
+    int r = (color >> 16) & 255;
+    int g = (color >> 8) & 255;
+    int b = color & 255;
+    pixel[0] = (uint8_t)(pixel[0] + (((r - pixel[0]) * amount) >> 8));
+    pixel[1] = (uint8_t)(pixel[1] + (((g - pixel[1]) * amount) >> 8));
+    pixel[2] = (uint8_t)(pixel[2] + (((b - pixel[2]) * amount) >> 8));
+    pixel[3] = 255;
+}
+
+static void clear_canvas(uint32_t color)
+{
+    for (int y = 0; y < LH; y++)
+        for (int x = 0; x < LW; x++)
+            pixel_set(x, y, color);
+}
+
+static void fill_rect(int x, int y, int width, int height,
+                      uint32_t color, float alpha)
+{
+    int left = clampi(x, 0, LW);
+    int top = clampi(y, 0, LH);
+    int right = clampi(x + width, 0, LW);
+    int bottom = clampi(y + height, 0, LH);
+    for (int py = top; py < bottom; py++)
+        for (int px = left; px < right; px++)
+            pixel_blend(px, py, color, alpha);
+}
+
+static void fill_gradient(int x, int y, int width, int height,
+                          uint32_t top_color, uint32_t bottom_color,
+                          float alpha)
+{
+    for (int py = y; py < y + height; py++) {
+        float t = height > 1 ? (float)(py - y) / (height - 1) : 0.0f;
+        uint32_t color = color_mix(top_color, bottom_color, t);
+        for (int px = x; px < x + width; px++)
+            pixel_blend(px, py, color, alpha);
+    }
+}
+
+static void fill_circle(float cx, float cy, float radius,
+                        uint32_t color, float alpha)
+{
+    int left = (int)floorf(cx - radius - 1);
+    int right = (int)ceilf(cx + radius + 1);
+    int top = (int)floorf(cy - radius - 1);
+    int bottom = (int)ceilf(cy + radius + 1);
+    float radius_squared = radius * radius;
+    for (int y = top; y <= bottom; y++) {
+        for (int x = left; x <= right; x++) {
+            float dx = x + 0.5f - cx;
+            float dy = y + 0.5f - cy;
+            float distance = dx * dx + dy * dy;
+            if (distance <= radius_squared) {
+                float edge = clampf(radius - sqrtf(distance), 0.0f, 1.0f);
+                pixel_blend(x, y, color, alpha * edge);
+            }
+        }
+    }
+}
+
+static void fill_ellipse(float cx, float cy, float radius_x, float radius_y,
+                         uint32_t color, float alpha)
+{
+    int left = (int)floorf(cx - radius_x - 1);
+    int right = (int)ceilf(cx + radius_x + 1);
+    int top = (int)floorf(cy - radius_y - 1);
+    int bottom = (int)ceilf(cy + radius_y + 1);
+    for (int y = top; y <= bottom; y++) {
+        for (int x = left; x <= right; x++) {
+            float dx = (x + 0.5f - cx) / radius_x;
+            float dy = (y + 0.5f - cy) / radius_y;
+            if (dx * dx + dy * dy <= 1.0f)
+                pixel_blend(x, y, color, alpha);
+        }
+    }
+}
+
+static float edge_value(float ax, float ay, float bx, float by,
+                        float px, float py)
+{
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+}
+
+static void fill_triangle(float ax, float ay, float bx, float by,
+                          float cx, float cy, uint32_t color, float alpha)
+{
+    int left = (int)floorf(fminf(ax, fminf(bx, cx))) - 1;
+    int right = (int)ceilf(fmaxf(ax, fmaxf(bx, cx))) + 1;
+    int top = (int)floorf(fminf(ay, fminf(by, cy))) - 1;
+    int bottom = (int)ceilf(fmaxf(ay, fmaxf(by, cy))) + 1;
+    for (int y = top; y <= bottom; y++) {
+        for (int x = left; x <= right; x++) {
+            float px = x + 0.5f;
+            float py = y + 0.5f;
+            float one = edge_value(bx, by, cx, cy, px, py);
+            float two = edge_value(cx, cy, ax, ay, px, py);
+            float three = edge_value(ax, ay, bx, by, px, py);
+            if ((one >= 0 && two >= 0 && three >= 0) ||
+                (one <= 0 && two <= 0 && three <= 0))
+                pixel_blend(x, y, color, alpha);
+        }
+    }
+}
+
+static void draw_line(float x0, float y0, float x1, float y1, float width,
+                      uint32_t color, float alpha)
+{
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    int steps = (int)fmaxf(fabsf(dx), fabsf(dy)) + 1;
+    if (steps < 1) steps = 1;
+    for (int i = 0; i <= steps; i++) {
+        float t = (float)i / steps;
+        fill_circle(x0 + dx * t, y0 + dy * t, width * 0.5f,
+                    color, alpha);
+    }
+}
+
+static void rounded_rect(int x, int y, int width, int height, int radius,
+                         uint32_t color, float alpha)
+{
+    if (radius < 1) {
+        fill_rect(x, y, width, height, color, alpha);
+        return;
+    }
+    fill_rect(x + radius, y, width - radius * 2, height, color, alpha);
+    fill_rect(x, y + radius, width, height - radius * 2, color, alpha);
+    fill_circle(x + radius, y + radius, radius, color, alpha);
+    fill_circle(x + width - radius - 1, y + radius, radius, color, alpha);
+    fill_circle(x + radius, y + height - radius - 1, radius, color, alpha);
+    fill_circle(x + width - radius - 1, y + height - radius - 1,
+                radius, color, alpha);
+}
+
+static void panel(int x, int y, int width, int height, uint32_t color,
+                  float alpha)
+{
+    rounded_rect(x + 4, y + 5, width, height, 13, 0x000000, alpha * 0.45f);
+    rounded_rect(x, y, width, height, 13, color, alpha);
+    fill_rect(x + 12, y + 3, width - 24, 2, GOLD, alpha * 0.75f);
+}
+
+/* Compact original 5x7 uppercase font.  Lowercase text is folded to uppercase
+ * at draw time, which gives the UI a readable late-console display style. */
+static const char GLYPH_ORDER[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-:+/()'&%#*<>=$[]";
+
+static const uint8_t GLYPHS[][7] = {
+    {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30},
+    {14,17,16,16,16,17,14}, {30,17,17,17,17,17,30},
+    {31,16,16,30,16,16,31}, {31,16,16,30,16,16,16},
+    {14,17,16,23,17,17,15}, {17,17,17,31,17,17,17},
+    {14,4,4,4,4,4,14}, {7,2,2,2,18,18,12},
+    {17,18,20,24,20,18,17}, {16,16,16,16,16,16,31},
+    {17,27,21,21,17,17,17}, {17,25,21,19,17,17,17},
+    {14,17,17,17,17,17,14}, {30,17,17,30,16,16,16},
+    {14,17,17,17,21,18,13}, {30,17,17,30,20,18,17},
+    {15,16,16,14,1,1,30}, {31,4,4,4,4,4,4},
+    {17,17,17,17,17,17,14}, {17,17,17,17,17,10,4},
+    {17,17,17,21,21,21,10}, {17,17,10,4,10,17,17},
+    {17,17,10,4,4,4,4}, {31,1,2,4,8,16,31},
+    {14,17,19,21,25,17,14}, {4,12,4,4,4,4,14},
+    {14,17,1,2,4,8,31}, {30,1,1,14,1,1,30},
+    {2,6,10,18,31,2,2}, {31,16,16,30,1,1,30},
+    {14,16,16,30,17,17,14}, {31,1,2,4,8,8,8},
+    {14,17,17,14,17,17,14}, {14,17,17,15,1,1,14},
+    {0,0,0,0,0,4,4}, {0,0,0,0,4,4,8},
+    {4,0,4,4,4,0,4}, {14,17,1,2,4,0,4},
+    {0,0,0,31,0,0,0}, {0,0,4,0,0,4,0},
+    {0,4,4,31,4,4,0}, {1,2,4,8,16,0,0},
+    {2,4,8,8,8,4,2}, {8,4,2,2,2,4,8},
+    {4,4,0,0,0,0,0}, {8,20,8,21,18,13,0},
+    {17,2,4,8,17,0,0}, {10,31,10,31,10,0,0},
+    {4,21,14,31,14,21,4}, {1,2,4,8,4,2,1},
+    {16,8,4,2,4,8,16}, {0,31,0,31,0,0,0},
+    {4,15,20,14,5,30,4}, {14,8,8,8,8,8,14},
+    {14,2,2,2,2,2,14}
+};
+
+static const uint8_t *glyph_for(char character)
+{
+    static const uint8_t blank[7] = {0};
+    if (character >= 'a' && character <= 'z')
+        character = (char)(character - 'a' + 'A');
+    const char *found = strchr(GLYPH_ORDER, character);
+    if (!found) return blank;
+    size_t index = (size_t)(found - GLYPH_ORDER);
+    if (index >= sizeof GLYPHS / sizeof GLYPHS[0]) return blank;
+    return GLYPHS[index];
+}
+
+static int text_width(const char *text, int scale)
+{
+    return (int)strlen(text) * 6 * scale - scale;
+}
+
+static void draw_text(int x, int y, const char *text, uint32_t color,
+                      float alpha, int scale)
+{
+    int origin = x;
+    for (const char *cursor = text; *cursor; cursor++) {
+        if (*cursor == '\n') {
+            y += 9 * scale;
+            x = origin;
+            continue;
+        }
+        const uint8_t *rows = glyph_for(*cursor);
+        for (int gy = 0; gy < 7; gy++) {
+            for (int gx = 0; gx < 5; gx++) {
+                if (!(rows[gy] & (1 << (4 - gx)))) continue;
+                fill_rect(x + gx * scale, y + gy * scale,
+                          scale, scale, color, alpha);
+            }
+        }
+        x += 6 * scale;
+    }
+}
+
+static void draw_text_shadow(int x, int y, const char *text, uint32_t color,
+                             float alpha, int scale)
+{
+    draw_text(x + scale, y + scale, text, 0x000000, alpha * 0.7f, scale);
+    draw_text(x, y, text, color, alpha, scale);
+}
+
+static void draw_text_center(int center_x, int y, const char *text,
+                             uint32_t color, float alpha, int scale)
+{
+    draw_text(center_x - text_width(text, scale) / 2, y,
+              text, color, alpha, scale);
+}
+
+static void draw_text_right(int right, int y, const char *text,
+                            uint32_t color, float alpha, int scale)
+{
+    draw_text(right - text_width(text, scale), y, text, color, alpha, scale);
+}
+
+static void draw_wrapped_text(int x, int y, int width, const char *text,
+                              uint32_t color, float alpha, int scale,
+                              int max_lines)
+{
+    char line[160] = {0};
+    int line_length = 0;
+    int lines = 0;
+    int max_characters = width / (6 * scale);
+    const char *word = text;
+    while (*word && lines < max_lines) {
+        while (*word == ' ') word++;
+        const char *end = word;
+        while (*end && *end != ' ') end++;
+        int word_length = (int)(end - word);
+        if (line_length && line_length + 1 + word_length > max_characters) {
+            draw_text(x, y + lines * 9 * scale, line, color, alpha, scale);
+            lines++;
+            line[0] = '\0';
+            line_length = 0;
+            if (lines >= max_lines) break;
+        }
+        if (line_length) line[line_length++] = ' ';
+        int copy = word_length;
+        if (copy > (int)sizeof line - line_length - 1)
+            copy = (int)sizeof line - line_length - 1;
+        memcpy(line + line_length, word, (size_t)copy);
+        line_length += copy;
+        line[line_length] = '\0';
+        word = end;
+    }
+    if (line_length && lines < max_lines)
+        draw_text(x, y + lines * 9 * scale, line, color, alpha, scale);
+}
+
+static bool ppm_token(FILE *file, char *buffer, size_t length)
+{
+    int character;
+    do {
+        character = fgetc(file);
+        if (character == '#')
+            while (character != '\n' && character != EOF)
+                character = fgetc(file);
+    } while (character != EOF && character <= ' ');
+    if (character == EOF) return false;
+    size_t used = 0;
+    while (character > ' ' && character != EOF) {
+        if (used + 1 < length) buffer[used++] = (char)character;
+        character = fgetc(file);
+    }
+    buffer[used] = '\0';
+    return true;
+}
+
+static Bitmap load_ppm(const char *path)
+{
+    Bitmap bitmap = {0};
+    FILE *file = fopen(path, "rb");
+    if (!file) return bitmap;
+    char token[64];
+    if (!ppm_token(file, token, sizeof token) || strcmp(token, "P6"))
+        goto failed;
+    if (!ppm_token(file, token, sizeof token)) goto failed;
+    bitmap.w = atoi(token);
+    if (!ppm_token(file, token, sizeof token)) goto failed;
+    bitmap.h = atoi(token);
+    if (!ppm_token(file, token, sizeof token) || atoi(token) != 255)
+        goto failed;
+    if (bitmap.w <= 0 || bitmap.h <= 0 || bitmap.w > 4096 || bitmap.h > 4096)
+        goto failed;
+    bitmap.px = malloc((size_t)bitmap.w * bitmap.h * sizeof *bitmap.px);
+    if (!bitmap.px) goto failed;
+    for (int i = 0; i < bitmap.w * bitmap.h; i++) {
+        unsigned char rgb[3];
+        if (fread(rgb, 1, 3, file) != 3) {
+            free(bitmap.px);
+            bitmap.px = NULL;
+            goto failed;
+        }
+        bitmap.px[i] = ((uint32_t)rgb[0] << 16) |
+                       ((uint32_t)rgb[1] << 8) | rgb[2];
+    }
+    fclose(file);
+    bitmap.ok = true;
+    return bitmap;
+
+failed:
+    fclose(file);
+    return bitmap;
+}
+
+static void free_bitmap(Bitmap *bitmap)
+{
+    free(bitmap->px);
+    memset(bitmap, 0, sizeof *bitmap);
+}
+
+static void draw_bitmap_cover(const Bitmap *bitmap, float darken)
+{
+    if (!bitmap->ok) {
+        fill_gradient(0, 0, LW, LH, 0x7B9B9B, 0xD49A51, 1.0f);
+        return;
+    }
+    for (int y = 0; y < LH; y++) {
+        int sy = y * bitmap->h / LH;
+        for (int x = 0; x < LW; x++) {
+            int sx = x * bitmap->w / LW;
+            uint32_t color = bitmap->px[sy * bitmap->w + sx];
+            if (darken > 0.0f) color = color_mix(color, NIGHT, darken);
+            pixel_set(x, y, color);
+        }
+    }
+}
+
+static bool is_chroma(uint32_t color)
+{
+    int red = (color >> 16) & 255;
+    int green = (color >> 8) & 255;
+    int blue = color & 255;
+    return red > 215 && blue > 215 && green < 90;
+}
+
+static void draw_bitmap_scaled(const Bitmap *bitmap, int x, int y,
+                               int width, int height, bool flip,
+                               uint32_t tint, float tint_amount, float alpha)
+{
+    if (!bitmap->ok || width <= 0 || height <= 0) return;
+    for (int dy = 0; dy < height; dy++) {
+        int sy = dy * bitmap->h / height;
+        for (int dx = 0; dx < width; dx++) {
+            int raw_x = dx * bitmap->w / width;
+            int sx = flip ? bitmap->w - 1 - raw_x : raw_x;
+            uint32_t color = bitmap->px[sy * bitmap->w + sx];
+            if (is_chroma(color)) continue;
+            if (tint_amount > 0.0f)
+                color = color_mix(color, tint, tint_amount);
+            pixel_blend(x + dx, y + dy, color, alpha);
+        }
+    }
+}
+
+static void draw_ember(float x, float y, float phase, float size)
+{
+    float pulse = 0.7f + 0.3f * sinf(phase);
+    fill_circle(x, y, size * 1.8f, ORANGE, 0.13f * pulse);
+    fill_circle(x, y, size, GOLD, 0.8f * pulse);
+    fill_circle(x, y, size * 0.42f, 0xFFF4C4, 0.95f * pulse);
+}
+
+static void draw_ambient_embers(int count, float strength)
+{
+    for (int i = 0; i < count; i++) {
+        float phase = G.time * (0.7f + (i % 5) * 0.08f) + i * 1.91f;
+        float x = fmodf(i * 173.0f + sinf(phase) * 28.0f + 1200.0f, LW + 80.0f) - 40.0f;
+        float y = LH - fmodf(i * 71.0f + G.time * (18 + i % 9), LH + 60.0f);
+        draw_ember(x, y, phase, 1.3f + (i % 3) * 0.55f * strength);
+    }
+}
+
+static void draw_progress_bar(int x, int y, int width, int height,
+                              float value, float maximum, uint32_t color,
+                              const char *label)
+{
+    rounded_rect(x, y, width, height, height / 2, 0x121719, 0.78f);
+    float fraction = maximum > 0 ? clampf(value / maximum, 0.0f, 1.0f) : 0.0f;
+    int inner = (int)((width - 4) * fraction);
+    if (inner > 0)
+        rounded_rect(x + 2, y + 2, inner, height - 4,
+                     height / 2 - 2, color, 0.95f);
+    if (label)
+        draw_text(x + 7, y + (height - 14) / 2, label, CREAM, 1.0f, 2);
+}
+
+static void draw_choice(int x, int y, int width, int height, const char *label,
+                        const char *hint, bool selected, bool enabled)
+{
+    uint32_t base = selected ? ORANGE : NIGHT;
+    float alpha = selected ? 0.94f : 0.78f;
+    rounded_rect(x, y, width, height, 9, base, alpha);
+    if (selected) {
+        fill_triangle(x - 11, y + height / 2.0f, x - 2, y + height / 2.0f - 7,
+                      x - 2, y + height / 2.0f + 7, GOLD, 1.0f);
+        fill_rect(x + 5, y + 5, 3, height - 10, GOLD, 0.9f);
+    }
+    uint32_t text_color = enabled ? CREAM : 0x8D8A83;
+    draw_text(x + 15, y + 11, label, text_color, enabled ? 1.0f : 0.65f, 2);
+    if (hint && *hint &&
+        text_width(label, 2) + text_width(hint, 1) <= width - 42)
+        draw_text_right(x + width - 12, y + 13, hint,
+                        selected ? 0xFFF5D1 : 0xB9C4B4,
+                        enabled ? 0.95f : 0.5f, 1);
+}
+
+static void draw_stat_row(int x, int y, int width, StatKind stat, int value)
+{
+    char amount[24];
+    snprintf(amount, sizeof amount, "%d", value);
+    draw_text(x, y, STAT_NAMES[stat], CREAM, 0.96f, 1);
+    draw_text_right(x + width, y, amount, GOLD, 1.0f, 1);
+    int bar_x = x + 67;
+    int bar_width = width - 96;
+    rounded_rect(bar_x, y + 1, bar_width, 6, 3, 0x0C2024, 0.8f);
+    int fill = (int)(bar_width * clampf(value / 500.0f, 0.02f, 1.0f));
+    rounded_rect(bar_x, y + 1, fill, 6, 3,
+                 stat == STAT_INTELLECT ? CORAL :
+                 stat == STAT_SPEED ? 0x67C4B2 : GOLD, 0.95f);
+}
+
+static void draw_footer(const char *text)
+{
+    fill_rect(0, LH - 28, LW, 28, 0x101C22, 0.9f);
+    draw_text_center(LW / 2, LH - 20, text, 0xEADCAD, 0.88f, 1);
+}
+
+static void draw_header(const char *section)
+{
+    fill_gradient(0, 0, LW, 46, 0x13252E, 0x1A3038, 0.95f);
+    draw_text(22, 14, section, GOLD, 1.0f, 2);
+    char date[64];
+    snprintf(date, sizeof date, "YEAR %d  %s %02d", game_year(),
+             game_season_name(), game_week_of_year());
+    draw_text_center(LW / 2, 16, date, CREAM, 0.95f, 1);
+    char money[64];
+    snprintf(money, sizeof money, "%d G  |  %s LEAGUE",
+             G.money, RANK_NAMES[G.kilix.rank]);
+    draw_text_right(LW - 22, 16, money, CREAM, 0.95f, 1);
+}
+
+static void draw_kilix(float anchor_x, float ground_y, float size, bool flip,
+                       int pose)
+{
+    float bob = sinf(G.time * 2.7f + G.ambient_phase) * 3.0f;
+    float squash = 1.0f;
+    float stretch = 1.0f;
+    float x_shift = 0.0f;
+    uint32_t tint = 0xFFFFFF;
+    float tint_amount = 0.0f;
+
+    if (G.kilix.fatigue > 75 && pose == 0) {
+        bob = fabsf(sinf(G.time * 1.3f)) * 1.5f + 7.0f;
+        squash = 0.94f;
+        stretch = 0.97f;
+    }
+    if (pose == 1) {
+        float jump = fabsf(sinf(G.time * 5.5f));
+        bob -= jump * 22.0f;
+        squash = 1.05f - jump * 0.08f;
+        stretch = 0.95f + jump * 0.12f;
+    } else if (pose == 2) {
+        bob += 10.0f;
+        squash = 1.08f;
+        stretch = 0.88f;
+        tint = 0x8395A4;
+        tint_amount = 0.17f;
+    } else if (pose == 3) {
+        float attack = sinf(clampf(G.battle.phase_timer * 8.0f, 0.0f, 3.14159f));
+        x_shift = attack * 92.0f;
+        squash = 1.0f + attack * 0.12f;
+        stretch = 1.0f - attack * 0.08f;
+    } else if (pose == 4) {
+        x_shift = sinf(G.time * 54.0f) * 9.0f;
+        tint = 0xFFF2C2;
+        tint_amount = 0.48f;
+    }
+
+    int width = (int)(size * squash);
+    int height = (int)(size * stretch);
+    float facing_shift = flip ? -x_shift : x_shift;
+    int x = (int)(anchor_x - width * 0.5f + facing_shift);
+    int y = (int)(ground_y - height + bob);
+
+    fill_ellipse(anchor_x + facing_shift, ground_y + 3.0f,
+                 size * 0.27f, size * 0.045f, 0x1A1715, 0.35f);
+    draw_bitmap_scaled(&kilix_sprite, x, y, width, height, flip,
+                       tint, tint_amount, 1.0f);
+
+    for (int i = 0; i < 5; i++) {
+        float phase = G.time * (2.0f + i * 0.12f) + i * 1.31f;
+        float ex = anchor_x + facing_shift + (flip ? 1 : -1) * size * 0.31f +
+                   sinf(phase) * 9.0f;
+        float ey = ground_y - size * 0.53f -
+                   fmodf(G.time * (11 + i * 2) + i * 21.0f, size * 0.25f);
+        draw_ember(ex, ey, phase, 1.2f + (i & 1));
+    }
+}
+
+static void draw_opponent(int index, float anchor_x, float ground_y,
+                          float size, int pose)
+{
+    index = clampi(index, 0, OPPONENT_COUNT - 1);
+    float bob = sinf(G.time * (2.0f + index * 0.12f) + index) * 3.0f;
+    float shake = pose == 4 ? sinf(G.time * 49.0f) * 8.0f : 0.0f;
+    float lunge = 0.0f;
+    if (pose == 3)
+        lunge = -sinf(clampf(G.battle.phase_timer * 8.0f, 0.0f, 3.14159f)) * 82.0f;
+    /* Attack-recoil squash and a pale flash while taking a hit, mirroring the
+     * Kilix so both fighters read the same way. */
+    float squash = 1.0f, stretch = 1.0f;
+    uint32_t tint = 0xFFFFFF;
+    float tint_amount = 0.0f;
+    if (pose == 3) { squash = 1.06f; stretch = 0.95f; }
+    else if (pose == 4) { tint = 0xFFC9C2; tint_amount = 0.5f; }
+
+    float x = anchor_x + shake + lunge;
+    float y = ground_y + bob;
+    fill_ellipse(x, ground_y + 4, size * 0.31f, size * 0.055f,
+                 0x171513, 0.36f);
+
+    const Bitmap *sprite = &opponent_sprites[index];
+    if (sprite->ok) {
+        /* The rival plate is ground-anchored like the Kilix, so scaling the
+         * whole canvas to `size` lands its feet on the arena floor. The art
+         * already faces left toward the player, so no flip. */
+        int w = (int)(size * squash);
+        int h = (int)(size * stretch);
+        draw_bitmap_scaled(sprite, (int)(x - w * 0.5f), (int)(y - h),
+                           w, h, false, tint, tint_amount, 1.0f);
+    } else {
+        /* Missing asset: a plain colored blob so the fight still reads. */
+        fill_ellipse(x, y - size * 0.32f, size * 0.34f, size * 0.26f,
+                     OPPONENTS[index].color, 1.0f);
+    }
+}
+
+static int ranch_pose(void)
+{
+    if (G.kilix.fatigue >= 82 || G.kilix.stress >= 85) return 2;
+    if (G.kilix.bond >= 75 && fmodf(G.time, 9.0f) < 1.2f) return 1;
+    return 0;
+}
+
+static void draw_title(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.16f);
+    fill_gradient(0, 0, LW, LH, 0x132A35, 0x441D16, 0.24f);
+    draw_ambient_embers(30, 1.0f);
+    draw_kilix(738, 505, 430, false, 0);
+
+    panel(48, 58, 487, 423, NIGHT, 0.91f);
+    draw_text_shadow(83, 94, "KILIX", GOLD, 1.0f, 6);
+    draw_text_shadow(84, 147, "RANCHER", CREAM, 1.0f, 4);
+    draw_text(85, 190, "RAISE THE SPARK. WIN THE CROWN.",
+              0xD8B982, 0.95f, 1);
+    fill_rect(84, 213, 392, 2, ORANGE, 0.85f);
+
+    static const char *options[] = {
+        "CONTINUE RANCH", "NEW RANCH", "FIELD GUIDE", "QUIT"
+    };
+    for (int i = 0; i < 4; i++) {
+        bool enabled = i != 0 || G.save_exists;
+        const char *hint = i == 0 && !G.save_exists ? "NO SAVE" : "";
+        draw_choice(90, 235 + i * 51, 360, 41, options[i], hint,
+                    G.title_cursor == i, enabled);
+    }
+    draw_text(83, 454, "ORIGINAL FIRE-KITTEN RAISING ADVENTURE",
+              0xB9C6B1, 0.78f, 1);
+    draw_footer("ARROWS / WASD  MOVE     ENTER  CHOOSE     M  SOUND");
+}
+
+static void draw_naming(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.34f);
+    draw_ambient_embers(18, 0.8f);
+    panel(155, 76, 650, 398, NIGHT, 0.94f);
+    draw_kilix(330, 447, 315, false, 0);
+    draw_text(462, 113, "A NEW SPARK", GOLD, 1.0f, 3);
+    draw_text(463, 151, "SPECIES: KILIX", CREAM, 0.9f, 1);
+    draw_text(463, 170, "TYPE: FIRE KITTEN", 0xD4B27A, 0.9f, 1);
+    draw_wrapped_text(463, 207, 285,
+                      "THIS LITTLE FLAME HAS CHOSEN YOUR HEARTH. WHAT WILL YOU CALL THEM?",
+                      CREAM, 0.95f, 2, 4);
+    rounded_rect(459, 309, 300, 55, 10, 0x0E171C, 0.95f);
+    fill_rect(468, 354, 280, 2, ORANGE, 0.9f);
+    char name[32];
+    snprintf(name, sizeof name, "%s%s", G.name_input,
+             fmodf(G.time, 1.0f) < 0.55f ? "_" : "");
+    draw_text(477, 326, name, GOLD, 1.0f, 2);
+    draw_text(463, 390, "ENTER TO BEGIN  |  ESC TO RETURN",
+              0xB7C5B7, 0.82f, 1);
+    draw_footer("TYPE A NAME     BACKSPACE  ERASE     ENTER  ADOPT");
+}
+
+static void draw_ranch_status(void)
+{
+    panel(706, 68, 230, 390, NIGHT, 0.89f);
+    draw_text(728, 89, G.kilix.name, GOLD, 1.0f, 3);
+    draw_text(730, 120, "KILIX  //  FIRE KITTEN", CREAM, 0.75f, 1);
+    char condition[64];
+    snprintf(condition, sizeof condition, "MOOD: %s", game_condition());
+    draw_text(730, 143, condition,
+              G.kilix.fatigue > 75 ? CORAL : 0x8FD1B5, 1.0f, 1);
+    fill_rect(726, 166, 190, 2, 0xC7A65B, 0.6f);
+    for (int stat = 0; stat < STAT_COUNT; stat++)
+        draw_stat_row(728, 183 + stat * 27, 185, (StatKind)stat,
+                      G.kilix.stats.value[stat]);
+
+    fill_rect(726, 351, 190, 2, 0xC7A65B, 0.6f);
+    char value[64];
+    snprintf(value, sizeof value, "BOND  %d%%", G.kilix.bond);
+    draw_progress_bar(728, 367, 185, 20, G.kilix.bond, 100, 0xE98A5C, value);
+    snprintf(value, sizeof value, "FATIGUE  %d%%", G.kilix.fatigue);
+    draw_progress_bar(728, 394, 185, 20, G.kilix.fatigue, 100,
+                      G.kilix.fatigue > 70 ? CORAL : 0x6CA69C, value);
+    snprintf(value, sizeof value, "RATING %d   AGE %dY %dW",
+             game_overall_rating(), G.kilix.age_weeks / 48,
+             G.kilix.age_weeks % 48);
+    draw_text(730, 428, value, 0xD7C18C, 0.9f, 1);
+}
+
+static void draw_ranch(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.03f);
+    draw_ambient_embers(16, 0.7f);
+    draw_header("HEARTHSIDE RANCH");
+
+    panel(24, 68, 264, 390, NIGHT, 0.89f);
+    draw_text(48, 88, "THIS WEEK", GOLD, 1.0f, 2);
+    draw_text(49, 113, "ONE CHOICE MOVES TIME FORWARD", CREAM, 0.66f, 1);
+    static const char *labels[] = {
+        "DRILLS", "CATNAP", "CARE BASKET", "FESTIVAL ARENA", "JOURNAL", "SAVE & STAY"
+    };
+    static const char *hints[] = {
+        "+ STATS", "- FATIGUE", "FOOD", "LEAGUE", "INFO", "SAVE"
+    };
+    for (int i = 0; i < 6; i++)
+        draw_choice(48, 140 + i * 48, 214, 39, labels[i], hints[i],
+                    G.cursor == i, true);
+
+    int pose = ranch_pose();
+    draw_kilix(505, 468, 360, false, pose);
+    fill_ellipse(510, 461, 124, 12, 0x16110D, 0.17f);
+
+    rounded_rect(316, 386, 358, 72, 13, 0xFFF0C9, 0.91f);
+    fill_triangle(492, 386, 513, 366, 535, 386, 0xFFF0C9, 0.91f);
+    const char *message = G.toast_timer > 0.0f ? G.toast :
+        G.kilix.fatigue > 78 ? "MY FLAME FEELS SMALL... MAYBE A CATNAP?" :
+        G.kilix.stress > 74 ? "CAN WE SLOW DOWN THIS WEEK?" :
+        G.kilix.bond > 70 ? "WHATEVER WE DO, LET'S DO IT TOGETHER!" :
+        "THE AIR SMELLS LIKE A BRAND-NEW ADVENTURE.";
+    draw_wrapped_text(336, 404, 320, message, INK, 1.0f, 1, 3);
+
+    draw_ranch_status();
+    if (G.autosave_flash > 0.0f) {
+        rounded_rect(787, 474, 147, 30, 8, NIGHT, 0.84f);
+        draw_text(803, 485, "EMBER SAVED", GOLD, 0.95f, 1);
+    }
+    draw_footer("ARROWS / WASD  CHOOSE     ENTER  CONFIRM     J  JOURNAL     Q  QUIT");
+}
+
+static void draw_drill_icon(int index, float cx, float cy)
+{
+    float pulse = 1.0f + sinf(G.time * 2.0f) * 0.03f;
+    switch (index) {
+    case 0:
+        fill_rect((int)(cx - 64), (int)(cy + 24), 128, 12, 0x5C493B, 0.9f);
+        fill_circle(cx - 33, cy, 27 * pulse, 0x3A3331, 1.0f);
+        fill_circle(cx + 18, cy - 9, 35 * pulse, 0x51433B, 1.0f);
+        draw_ember(cx + 42, cy - 36, G.time * 3.0f, 4.0f);
+        break;
+    case 1:
+        rounded_rect((int)(cx - 52), (int)(cy - 36), 104, 72, 5,
+                     0x7B3D2F, 1.0f);
+        fill_rect((int)cx - 2, (int)(cy - 31), 4, 61, GOLD, 0.8f);
+        draw_ember(cx, cy - 57, G.time * 3.5f, 5.0f);
+        break;
+    case 2:
+        for (int i = 0; i < 4; i++) {
+            float angle = G.time * 0.8f + i * 1.57f;
+            draw_ember(cx + cosf(angle) * 54, cy + sinf(angle) * 32,
+                       angle * 2, 3.5f);
+        }
+        fill_ellipse(cx, cy + 31, 74, 9, 0x604529, 0.75f);
+        break;
+    case 3:
+        fill_rect((int)(cx - 8), (int)(cy - 51), 16, 94, 0x5B4636, 1.0f);
+        for (int i = -2; i <= 2; i++)
+            fill_rect((int)(cx - 55), (int)(cy + i * 17), 110, 7,
+                      0x865D3A, 0.9f);
+        draw_ember(cx + 7, cy - 61, G.time * 3, 4.0f);
+        break;
+    case 4:
+        fill_circle(cx, cy, 58, 0x4A2D25, 1.0f);
+        fill_circle(cx, cy, 45, CREAM, 1.0f);
+        fill_circle(cx, cy, 29, CORAL, 1.0f);
+        fill_circle(cx, cy, 12, GOLD, 1.0f);
+        draw_line(cx - 90, cy + 55, cx + 80, cy - 48, 5, NIGHT, 0.8f);
+        break;
+    default:
+        rounded_rect((int)(cx - 36), (int)(cy - 50), 72, 100, 8,
+                     0xDFB55C, 0.95f);
+        fill_circle(cx, cy - 13, 18, ORANGE, 1.0f);
+        fill_circle(cx, cy - 13, 8, GOLD, 1.0f);
+        draw_line(cx, cy + 13, cx, cy + 38, 4, INK, 0.65f);
+        break;
+    }
+}
+
+static void draw_training(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.24f);
+    draw_header("TRAINING YARD");
+    panel(24, 67, 400, 425, NIGHT, 0.91f);
+    draw_text(46, 87, "CHOOSE A DRILL", GOLD, 1.0f, 2);
+    draw_text(47, 112, "SUCCESS DEPENDS ON BOND AND ENERGY", CREAM, 0.67f, 1);
+    for (int i = 0; i < DRILL_COUNT; i++) {
+        char hint[32];
+        snprintf(hint, sizeof hint, "+%s", STAT_NAMES[DRILLS[i].primary]);
+        draw_choice(47, 137 + i * 55, 350, 46, DRILLS[i].name, hint,
+                    G.drill_cursor == i, true);
+    }
+
+    panel(455, 67, 480, 425, 0x203039, 0.91f);
+    int index = clampi(G.drill_cursor, 0, DRILL_COUNT - 1);
+    draw_text(482, 88, DRILLS[index].name, GOLD, 1.0f, 3);
+    draw_text(484, 122, DRILLS[index].subtitle, CREAM, 0.76f, 1);
+    draw_drill_icon(index, 758, 226);
+    draw_kilix(592, 337, 195, false, 0);
+    draw_wrapped_text(487, 349, 412, DRILLS[index].description,
+                      CREAM, 0.92f, 1, 3);
+    char detail[128];
+    snprintf(detail, sizeof detail, "%s +%d-%d   %s +1-%d",
+             STAT_NAMES[DRILLS[index].primary], DRILLS[index].min_gain,
+             DRILLS[index].max_gain, STAT_NAMES[DRILLS[index].secondary],
+             (DRILLS[index].max_gain + 1) / 2);
+    draw_text(487, 400, detail, 0x9DD7BE, 0.95f, 1);
+    int chance = DRILLS[index].success;
+    chance += G.kilix.stats.value[STAT_SKILL] / 35;
+    chance += G.kilix.bond / 18;
+    chance += (G.kilix.form - 50) / 9;
+    chance -= G.kilix.fatigue / 4;
+    chance -= G.kilix.stress / 5;
+    chance = clampi(chance, 12, 96);
+    snprintf(detail, sizeof detail, "SUCCESS %d%%   FATIGUE +%d   STRESS +%d",
+             chance, DRILLS[index].fatigue, DRILLS[index].stress);
+    draw_text(487, 425, detail,
+              chance < 50 ? CORAL : GOLD, 0.95f, 1);
+    if (G.kilix.fatigue >= 82)
+        draw_text(487, 446, "TOO TIRED - TAKE A CATNAP FIRST", CORAL, 1.0f, 1);
+    draw_footer("UP / DOWN  SELECT     ENTER  TRAIN ONE WEEK     ESC  RANCH");
+}
+
+static void draw_care(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.28f);
+    draw_header("CARE BASKET");
+    panel(37, 75, 475, 395, NIGHT, 0.92f);
+    draw_text(62, 96, "A TREAT FOR THIS WEEK", GOLD, 1.0f, 2);
+    draw_text(63, 123, "GOOD CARE BUILDS A LONGER, BRIGHTER BOND", CREAM, 0.7f, 1);
+    for (int i = 0; i < ITEM_COUNT; i++) {
+        char hint[24];
+        snprintf(hint, sizeof hint, "%d G", ITEMS[i].cost);
+        draw_choice(64, 158 + i * 67, 420, 55, ITEMS[i].name, hint,
+                    G.care_cursor == i, G.money >= ITEMS[i].cost);
+        draw_text(82, 193 + i * 67, ITEMS[i].description,
+                  0xB9C6B7, G.money >= ITEMS[i].cost ? 0.8f : 0.45f, 1);
+    }
+
+    panel(548, 75, 375, 395, 0x24353A, 0.9f);
+    draw_kilix(732, 405, 300, false, ranch_pose());
+    int index = clampi(G.care_cursor, 0, ITEM_COUNT - 1);
+    rounded_rect(578, 352, 315, 87, 12, CREAM, 0.92f);
+    char effects[160];
+    snprintf(effects, sizeof effects,
+             "FATIGUE %d   STRESS %d   BOND %+d   FORM %+d",
+             ITEMS[index].fatigue, ITEMS[index].stress,
+             ITEMS[index].bond, ITEMS[index].form);
+    draw_wrapped_text(598, 371, 275, effects, INK, 1.0f, 1, 3);
+    draw_footer("UP / DOWN  SELECT     ENTER  SHARE & ADVANCE WEEK     ESC  RANCH");
+}
+
+static void draw_arena(void)
+{
+    draw_bitmap_cover(&arena_background, 0.10f);
+    draw_header("FESTIVAL ARENA");
+    panel(25, 69, 300, 398, NIGHT, 0.91f);
+    draw_text(49, 91, "LEAGUE BOARD", GOLD, 1.0f, 2);
+    draw_text(50, 117, "DEFEAT YOUR CURRENT RIVAL", CREAM, 0.69f, 1);
+    for (int i = 0; i < OPPONENT_COUNT; i++) {
+        char label[64];
+        snprintf(label, sizeof label, "%s  %s", RANK_NAMES[i], OPPONENTS[i].name);
+        const char *hint = i == G.kilix.rank ? "READY" :
+                           i < G.kilix.rank ? "CLEARED" : "LOCKED";
+        draw_choice(49, 145 + i * 49, 252, 40, label, hint,
+                    G.arena_cursor == i, i == G.kilix.rank);
+    }
+
+    int index = clampi(G.arena_cursor, 0, OPPONENT_COUNT - 1);
+    panel(650, 69, 285, 398, 0x26343A, 0.91f);
+    draw_text_center(792, 91, OPPONENTS[index].name, GOLD, 1.0f, 3);
+    draw_text_center(792, 126, OPPONENTS[index].species, CREAM, 0.82f, 1);
+    draw_text_center(792, 145, OPPONENTS[index].epithet, 0xD6B97F, 0.82f, 1);
+    draw_opponent(index, 792, 380, 255, 0);
+    char value[64];
+    snprintf(value, sizeof value, "PRIZE  %d G", OPPONENTS[index].prize);
+    draw_text_center(792, 409, value, GOLD, 1.0f, 2);
+    snprintf(value, sizeof value, "RATING  %d",
+             (OPPONENTS[index].stats.value[0] +
+              OPPONENTS[index].stats.value[1] +
+              OPPONENTS[index].stats.value[2] +
+              OPPONENTS[index].stats.value[3] +
+              OPPONENTS[index].stats.value[4] +
+              OPPONENTS[index].stats.value[5]) / 6);
+    draw_text_center(792, 438, value, CREAM, 0.83f, 1);
+
+    draw_kilix(477, 445, 300, false, 0);
+    rounded_rect(347, 77, 267, 78, 11, CREAM, 0.91f);
+    char challenge[128];
+    if (index == G.kilix.rank)
+        snprintf(challenge, sizeof challenge, "%s IS YOUR %s LEAGUE RIVAL. READY?",
+                 OPPONENTS[index].name, RANK_NAMES[index]);
+    else if (index < G.kilix.rank)
+        snprintf(challenge, sizeof challenge, "YOU ALREADY CLEARED %s LEAGUE.",
+                 RANK_NAMES[index]);
+    else
+        snprintf(challenge, sizeof challenge, "WIN %s LEAGUE TO UNLOCK THIS RIVAL.",
+                 RANK_NAMES[index - 1]);
+    draw_wrapped_text(365, 96, 230, challenge, INK, 1.0f, 1, 3);
+    draw_footer("UP / DOWN  INSPECT RIVAL     ENTER  CHALLENGE     ESC  RANCH");
+}
+
+static void draw_flame_burst(float x, float y, float amount)
+{
+    amount = clampf(amount, 0.0f, 1.0f);
+    for (int i = 0; i < 18; i++) {
+        float angle = (float)i / 18.0f * 6.28318f + i * 0.37f;
+        float radius = (18.0f + (i % 5) * 8.0f) * amount;
+        float px = x + cosf(angle) * radius;
+        float py = y + sinf(angle) * radius * 0.7f;
+        draw_ember(px, py, angle + G.time * 5.0f,
+                   (2.0f + i % 4) * amount);
+    }
+    fill_circle(x, y, 33.0f * amount, ORANGE, 0.24f * amount);
+    fill_circle(x, y, 17.0f * amount, GOLD, 0.34f * amount);
+}
+
+static void draw_battle_hud(void)
+{
+    fill_gradient(0, 0, LW, 94, 0x10232D, 0x20343A, 0.95f);
+    char label[96];
+    snprintf(label, sizeof label, "%s  //  KILIX", G.kilix.name);
+    draw_text(28, 17, label, CREAM, 1.0f, 2);
+    /* Defensive clamp: no live path reaches here with an out-of-range
+     * opponent today, but the other battle draws guard it, so match them. */
+    int opponent = clampi(G.battle.opponent, 0, OPPONENT_COUNT - 1);
+    snprintf(label, sizeof label, "%s  //  %s",
+             OPPONENTS[opponent].name,
+             OPPONENTS[opponent].species);
+    draw_text_right(LW - 28, 17, label, CREAM, 1.0f, 2);
+
+    draw_progress_bar(27, 51, 330, 24, G.battle.player_hp,
+                      G.battle.player_max_hp,
+                      G.battle.player_hp < G.battle.player_max_hp * 0.25f ? CORAL : 0x6AC18D,
+                      "HEART");
+    draw_progress_bar(LW - 357, 51, 330, 24, G.battle.enemy_hp,
+                      G.battle.enemy_max_hp,
+                      G.battle.enemy_hp < G.battle.enemy_max_hp * 0.25f ? CORAL : 0xD79854,
+                      "HEART");
+    rounded_rect(LW / 2 - 47, 13, 94, 62, 12, 0x0D171B, 0.94f);
+    draw_text_center(LW / 2, 22, "TIME", 0xB8C8BB, 0.9f, 1);
+    snprintf(label, sizeof label, "%02d", clampi((int)ceilf(G.battle.timer), 0, 99));
+    draw_text_center(LW / 2, 40, label, GOLD, 1.0f, 3);
+}
+
+static void draw_move_cards(void)
+{
+    fill_gradient(0, 432, LW, 108, 0x10212A, 0x081217, 0.98f);
+    char guts[48];
+    snprintf(guts, sizeof guts, "WILL %02d", (int)G.battle.player_guts);
+    draw_progress_bar(24, 447, 162, 23, G.battle.player_guts, 100.0f,
+                      GOLD, guts);
+    draw_text(31, 482, "LEFT / RIGHT", CREAM, 0.86f, 1);
+    draw_text(31, 498, "CHANGE RANGE", CREAM, 0.67f, 1);
+
+    for (int i = 0; i < MOVE_COUNT; i++) {
+        int x = 202 + i * 183;
+        bool selected = G.battle.selected_move == i;
+        bool affordable = G.battle.player_guts >= MOVES[i].cost;
+        float range = G.battle.distance * 100.0f;
+        bool in_range = range >= MOVES[i].min_range && range <= MOVES[i].max_range;
+        rounded_rect(x, 445, 168, 72, 9,
+                     selected ? ORANGE : 0x20333A,
+                     selected ? 0.96f : 0.9f);
+        if (selected) fill_rect(x + 5, 451, 3, 59, GOLD, 0.95f);
+        char number[16];
+        snprintf(number, sizeof number, "%d", i + 1);
+        fill_circle(x + 21, 464, 12, selected ? GOLD : 0x41575C, 1.0f);
+        draw_text_center(x + 21, 460, number, INK, 1.0f, 1);
+        draw_text(x + 41, 456, MOVES[i].name,
+                  affordable && in_range ? CREAM : 0x8E9390,
+                  affordable ? 1.0f : 0.58f, 1);
+        char detail[48];
+        snprintf(detail, sizeof detail, "%d WILL  %02d-%02d RANGE",
+                 MOVES[i].cost, (int)MOVES[i].min_range,
+                 (int)MOVES[i].max_range);
+        draw_text(x + 16, 485, detail,
+                  in_range ? GOLD : 0x9CA49E, in_range ? 0.95f : 0.62f, 1);
+        draw_text(x + 16, 501,
+                  !in_range ? "OUT OF RANGE" : !affordable ? "NEED WILL" : "READY",
+                  in_range && affordable ? 0x9DDBB4 : CORAL, 0.9f, 1);
+    }
+}
+
+static void draw_distance_gauge(void)
+{
+    int x = 328;
+    int y = 404;
+    int width = 304;
+    rounded_rect(x, y, width, 12, 6, 0x0D171B, 0.83f);
+    fill_rect(x + 6, y + 4, width - 12, 4, 0xD2B269, 0.7f);
+    int marker = x + 6 + (int)((width - 12) * clampf(G.battle.distance, 0.0f, 1.0f));
+    fill_triangle(marker, y - 5, marker - 7, y + 2, marker + 7, y + 2,
+                  GOLD, 1.0f);
+    draw_text(x - 52, y + 2, "CLOSE", CREAM, 0.83f, 1);
+    draw_text(x + width + 12, y + 2, "FAR", CREAM, 0.83f, 1);
+}
+
+static void draw_battle(void)
+{
+    draw_bitmap_cover(&arena_background, 0.03f);
+    if (G.battle.shake > 0.0f)
+        fill_rect(0, 0, LW, LH, 0xFFF0C8, G.battle.shake * 0.06f);
+    draw_battle_hud();
+
+    float closeness = 1.0f - clampf(G.battle.distance, 0.0f, 1.0f);
+    float player_x = 245.0f + closeness * 115.0f;
+    float enemy_x = 715.0f - closeness * 115.0f;
+    int player_pose = G.battle.phase == BATTLE_PLAYER_ATTACK ? 3 :
+                      G.battle.phase == BATTLE_ENEMY_ATTACK ? 4 :
+                      G.battle.phase == BATTLE_FINISHED && G.battle.winner > 0 ? 1 :
+                      G.battle.phase == BATTLE_FINISHED ? 2 : 0;
+    int enemy_pose = G.battle.phase == BATTLE_ENEMY_ATTACK ? 3 :
+                     G.battle.phase == BATTLE_PLAYER_ATTACK ? 4 :
+                     G.battle.phase == BATTLE_FINISHED && G.battle.winner < 0 ? 1 :
+                     G.battle.phase == BATTLE_FINISHED ? 4 : 0;
+    draw_kilix(player_x, 395, 275, false, player_pose);
+    draw_opponent(G.battle.opponent, enemy_x, 390, 245, enemy_pose);
+
+    if ((G.battle.phase == BATTLE_PLAYER_ATTACK ||
+         G.battle.phase == BATTLE_ENEMY_ATTACK) && G.battle.hit) {
+        float target_x = G.battle.phase == BATTLE_PLAYER_ATTACK ? enemy_x : player_x;
+        float amount = sinf(clampf(G.battle.phase_timer * 9.0f, 0.0f, 3.14159f));
+        draw_flame_burst(target_x, 287, amount);
+    }
+    if (G.battle.callout[0]) {
+        rounded_rect(304, 105, 352, 41, 10, NIGHT, 0.84f);
+        draw_text_center(480, 119, G.battle.callout,
+                         G.battle.hit ? GOLD : CREAM, 1.0f, 2);
+    }
+    draw_distance_gauge();
+    draw_move_cards();
+
+    if (G.battle.phase == BATTLE_READY) {
+        panel(315, 174, 330, 117, NIGHT, 0.95f);
+        draw_text_center(480, 194, "READY YOUR FLAME", GOLD, 1.0f, 2);
+        draw_text_center(480, 229, "BUILD WILL. MIND YOUR RANGE.", CREAM, 0.9f, 1);
+        draw_text_center(480, 251, "PRESS ENTER", 0x9ED5B7, 0.95f, 1);
+    } else if (G.battle.phase == BATTLE_FINISHED) {
+        panel(306, 158, 348, 145, NIGHT, 0.96f);
+        const char *result = G.battle.winner > 0 ? "VICTORY!" :
+                             G.battle.winner < 0 ? "DEFEAT" : "TIME! DRAW";
+        draw_text_center(480, 181, result,
+                         G.battle.winner > 0 ? GOLD : CORAL, 1.0f, 4);
+        char detail[96];
+        snprintf(detail, sizeof detail, "LAST IMPACT  %d", G.battle.last_damage);
+        draw_text_center(480, 236, detail, CREAM, 0.8f, 1);
+        draw_text_center(480, 266, "ENTER FOR RESULTS", 0xA4D6BA, 1.0f, 1);
+    }
+}
+
+static void draw_event(void)
+{
+    bool arena_event = G.event.kind == EVENT_BATTLE_RESULT ||
+                       G.event.kind == EVENT_RANK_UP;
+    draw_bitmap_cover(arena_event ? &arena_background : &ranch_background,
+                      0.28f);
+    draw_ambient_embers(24, 1.0f);
+
+    if (G.event.kind == EVENT_TRAIN) {
+        draw_drill_icon(G.event.index, 245, 350);
+        draw_kilix(700, 475, 320, false,
+                   G.event.success ? (G.event.great ? 1 : 0) : 2);
+    } else if (G.event.kind == EVENT_REST) {
+        fill_ellipse(690, 445, 145, 23, 0x17110D, 0.26f);
+        draw_kilix(690, 475, 340, false, 2);
+        for (int i = 0; i < 3; i++) {
+            char z[8] = "Z";
+            draw_text(785 + i * 24, 285 - i * 31, z,
+                      CREAM, 0.55f + i * 0.15f, 2 + i);
+        }
+    } else if (G.event.kind == EVENT_FEED) {
+        draw_kilix(690, 475, 335, false, 1);
+        fill_circle(828, 414, 42, 0xB66B3F, 1.0f);
+        fill_circle(828, 408, 34, CREAM, 1.0f);
+        for (int i = 0; i < 5; i++)
+            draw_ember(808 + i * 10, 406 + (i & 1) * 7,
+                       G.time * 3 + i, 2.5f);
+    } else {
+        draw_kilix(315, 462, 285, false,
+                   G.event.success || G.event.kind == EVENT_RANK_UP ? 1 : 2);
+        draw_opponent(G.battle.opponent, 740, 452, 245,
+                      G.event.success ? 4 : 1);
+    }
+
+    float reveal = smoothstep(0.15f, 0.55f,
+                              G.event.duration > 0.0f ?
+                              G.event.timer / G.event.duration : 1.0f);
+    panel(170, 55, 620, 150, NIGHT, 0.93f * reveal);
+    draw_text_center(480, 79, G.event.title[0] ? G.event.title : "A WEEK PASSES",
+                     G.event.success ? GOLD : CORAL, reveal, 3);
+    draw_wrapped_text(205, 125, 550, G.event.detail,
+                      CREAM, 0.94f * reveal, 1, 4);
+
+    if (G.event.kind == EVENT_TRAIN && G.event.success) {
+        char gains[128];
+        snprintf(gains, sizeof gains, "%s +%d     %s +%d",
+                 STAT_NAMES[G.event.primary], G.event.gain_primary,
+                 STAT_NAMES[G.event.secondary], G.event.gain_secondary);
+        rounded_rect(105, 226, 390, 41, 9, 0x17383A, 0.88f * reveal);
+        draw_text_center(300, 241, gains, 0xA7E0BC, reveal, 1);
+    }
+    if (G.event.money_delta) {
+        char money[64];
+        snprintf(money, sizeof money, "%+d G", G.event.money_delta);
+        rounded_rect(214, 226, 172, 41, 9, 0x17383A, 0.88f * reveal);
+        draw_text_center(300, 240, money,
+                         G.event.money_delta > 0 ? GOLD : CORAL, reveal, 2);
+    }
+    draw_footer("ENTER  CONTINUE     ESC  SKIP");
+}
+
+static void draw_journal_card(int x, int y, int number, const char *title,
+                              const char *body, uint32_t color)
+{
+    rounded_rect(x, y, 250, 129, 12, color, 0.9f);
+    fill_circle(x + 30, y + 31, 17, GOLD, 0.95f);
+    char value[8];
+    snprintf(value, sizeof value, "%d", number);
+    draw_text_center(x + 30, y + 27, value, INK, 1.0f, 1);
+    draw_text(x + 57, y + 23, title, CREAM, 1.0f, 2);
+    draw_wrapped_text(x + 22, y + 61, 209, body, CREAM, 0.83f, 1, 4);
+}
+
+static void draw_journal(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.53f);
+    panel(44, 49, 872, 438, 0x17282F, 0.96f);
+    draw_text(76, 76, "THE HEARTHKEEPER'S JOURNAL", GOLD, 1.0f, 3);
+    char page[32];
+    snprintf(page, sizeof page, "PAGE %d / 3", G.journal_page + 1);
+    draw_text_right(882, 84, page, CREAM, 0.72f, 1);
+    fill_rect(75, 113, 808, 2, ORANGE, 0.7f);
+
+    if (G.journal_page == 0) {
+        draw_text(78, 135, "RAISING A KILIX", CREAM, 1.0f, 2);
+        draw_journal_card(78, 174, 1, "CHOOSE A WEEK",
+                          "DRILL, REST, SHARE FOOD, OR ENTER THE ARENA. MOST CHOICES ADVANCE THE CALENDAR.",
+                          0x24464A);
+        draw_journal_card(355, 174, 2, "WATCH THE FLAME",
+                          "FATIGUE AND STRESS LOWER SUCCESS. CATNAPS AND KIND CARE RESTORE YOUR PARTNER.",
+                          0x3A3E4B);
+        draw_journal_card(632, 174, 3, "BUILD A BOND",
+                          "A STRONG BOND MAKES DRILLS MORE RELIABLE AND HELPS KILIX FIGHT WITH CONFIDENCE.",
+                          0x4D3A35);
+        draw_journal_card(218, 322, 4, "SIX GIFTS",
+                          "HEART, CLAW, FLAME, GUARD, AGILITY, AND FOCUS EACH SHAPE TRAINING AND BATTLE.",
+                          0x314B3F);
+        draw_journal_card(495, 322, 5, "CLIMB THE LEAGUES",
+                          "DEFEAT EACH FESTIVAL RIVAL FROM KINDLING TO CROWN. THE FINAL FLAME AWAITS.",
+                          0x4C3535);
+    } else if (G.journal_page == 1) {
+        draw_text(78, 135, "ARENA TACTICS", CREAM, 1.0f, 2);
+        draw_journal_card(78, 174, 1, "BUILD WILL",
+                          "WILL RECHARGES IN REAL TIME. STRONGER MOVES COST MORE, SO PATIENCE CAN WIN A FIGHT.",
+                          0x24464A);
+        draw_journal_card(355, 174, 2, "MIND THE RANGE",
+                          "LEFT AND RIGHT CHANGE DISTANCE. EVERY MOVE ONLY WORKS INSIDE ITS SHOWN RANGE.",
+                          0x3A3E4B);
+        draw_journal_card(632, 174, 3, "READ THE ODDS",
+                          "FOCUS IMPROVES ACCURACY. AGILITY HELPS DODGE. GUARD SOFTENS EACH LANDED HIT.",
+                          0x4D3A35);
+        draw_journal_card(218, 322, 4, "CALL A MOVE",
+                          "PRESS 1-4 DIRECTLY, OR SELECT WITH UP AND DOWN THEN PRESS ENTER.",
+                          0x314B3F);
+        draw_journal_card(495, 322, 5, "THE BELL",
+                          "WHEN TIME ENDS, THE FIGHTER WITH THE GREATER HEART PERCENTAGE TAKES THE MATCH.",
+                          0x4C3535);
+    } else {
+        draw_text(78, 135, "THE KILIX WAY", CREAM, 1.0f, 2);
+        draw_kilix(255, 445, 290, false, 0);
+        draw_wrapped_text(400, 175, 430,
+                          "KILIX ARE FIRE KITTENS BORN WHERE A KIND HEARTH MEETS A WILD SPARK. THEIR TAIL FLAME BRIGHTENS WITH COURAGE AND DIMS WHEN THEY NEED REST.",
+                          CREAM, 0.95f, 2, 7);
+        draw_wrapped_text(400, 312, 430,
+                          "NO TWO BONDS BURN THE SAME. RAISE WITH PATIENCE, TRAIN WITH PURPOSE, AND LET YOUR PARTNER'S PERSONALITY SHAPE THE STORY.",
+                          0xBFD6BE, 0.88f, 1, 6);
+        draw_text(400, 410, "SPECIES  KILIX     AFFINITY  FIRE", GOLD, 0.95f, 1);
+    }
+    draw_footer("LEFT / RIGHT  TURN PAGE     ESC  RETURN");
+}
+
+static void draw_champion(void)
+{
+    draw_bitmap_cover(&arena_background, 0.34f);
+    fill_gradient(0, 0, LW, LH, 0x0A1620, 0x5A241A, 0.35f);
+    draw_ambient_embers(48, 1.4f);
+    draw_kilix(480, 505, 430, false, 1);
+    panel(160, 51, 640, 173, NIGHT, 0.94f);
+    draw_text_center(480, 79, "CROWN LEAGUE CHAMPION", GOLD, 1.0f, 4);
+    char line[96];
+    snprintf(line, sizeof line, "%s AND %s LIT THE GRAND HEARTH!",
+             "YOU", G.kilix.name);
+    draw_text_center(480, 135, line, CREAM, 0.95f, 2);
+    snprintf(line, sizeof line, "%d WINS  //  %d WEEKS TO THE CROWN",
+             G.kilix.total_wins, G.total_weeks);
+    draw_text_center(480, 174, line, 0xB7D7B8, 0.86f, 1);
+    draw_footer("ENTER  CONTINUE YOUR RANCH     J  JOURNAL     Q  QUIT");
+}
+
+static void draw_save_warning(void)
+{
+    /* Sticky, on every screen, until the next successful save clears it: a
+     * failed autosave must not vanish with the next screen change. */
+    if (!G.save_failed) return;
+    const char *msg = "SAVE FAILED - CHECK DISK SPACE / PERMISSIONS";
+    int width = clampi(text_width(msg, 1) + 40, 260, 760);
+    rounded_rect((LW - width) / 2, 8, width, 30, 8, 0x3A1216, 0.94f);
+    draw_text_center(LW / 2, 18, msg, CORAL, 0.98f, 1);
+}
+
+static void draw_toast_overlay(void)
+{
+    draw_save_warning();
+    if (G.toast_timer <= 0.0f || G.screen == SCREEN_RANCH) return;
+    int width = clampi(text_width(G.toast, 1) + 38, 220, 720);
+    rounded_rect((LW - width) / 2, 48, width, 38, 10, NIGHT, 0.92f);
+    draw_text_center(LW / 2, 61, G.toast, GOLD, 0.97f, 1);
+}
+
+static void scale_canvas_to_output(void)
+{
+    if (!output) return;
+    for (int y = 0; y < output_height; y++) {
+        for (int x = 0; x < output_width; x++) {
+            uint8_t *pixel = output + ((size_t)y * output_width + x) * 4;
+            pixel[0] = 10;
+            pixel[1] = 17;
+            pixel[2] = 21;
+            pixel[3] = 255;
+        }
+    }
+    int destination_width = output_width;
+    int destination_height = destination_width * LH / LW;
+    if (destination_height > output_height) {
+        destination_height = output_height;
+        destination_width = destination_height * LW / LH;
+    }
+    int offset_x = (output_width - destination_width) / 2;
+    int offset_y = (output_height - destination_height) / 2;
+    for (int y = 0; y < destination_height; y++) {
+        int sy = y * LH / destination_height;
+        for (int x = 0; x < destination_width; x++) {
+            int sx = x * LW / destination_width;
+            const uint8_t *source = canvas + ((size_t)sy * LW + sx) * 4;
+            uint8_t *target = output +
+                ((size_t)(offset_y + y) * output_width + offset_x + x) * 4;
+            target[0] = source[0];
+            target[1] = source[1];
+            target[2] = source[2];
+            target[3] = 255;
+        }
+    }
+}
+
+bool render_validate_assets(char *error, size_t error_length)
+{
+    struct {
+        const char *path;
+        int width;
+        int height;
+    } expected[] = {
+        {"backgrounds/ranch.ppm", 640, 360},
+        {"backgrounds/arena.ppm", 640, 360},
+        {"kilix.ppm", 384, 384},
+        {"opponents/mossnub.ppm", 320, 320},
+        {"opponents/dewdrop.ppm", 320, 320},
+        {"opponents/mistwing.ppm", 320, 320},
+        {"opponents/stonecalf.ppm", 320, 320},
+        {"opponents/moonmoth.ppm", 320, 320},
+        {"opponents/duskcub.ppm", 320, 320}
+    };
+    for (size_t i = 0; i < sizeof expected / sizeof expected[0]; i++) {
+        Bitmap bitmap = load_ppm(asset_path(expected[i].path));
+        if (!bitmap.ok || bitmap.w != expected[i].width ||
+            bitmap.h != expected[i].height) {
+            snprintf(error, error_length,
+                     "asset %s must be a P6 PPM at %dx%d",
+                     expected[i].path, expected[i].width, expected[i].height);
+            free_bitmap(&bitmap);
+            return false;
+        }
+        free_bitmap(&bitmap);
+    }
+    return true;
+}
+
+bool render_init(int width, int height, char *error, size_t error_length)
+{
+    canvas = calloc((size_t)LW * LH, 4);
+    if (!canvas) {
+        snprintf(error, error_length, "could not allocate logical framebuffer");
+        return false;
+    }
+    ranch_background = load_ppm(asset_path("backgrounds/ranch.ppm"));
+    arena_background = load_ppm(asset_path("backgrounds/arena.ppm"));
+    kilix_sprite = load_ppm(asset_path("kilix.ppm"));
+    if (!ranch_background.ok || ranch_background.w != 640 || ranch_background.h != 360 ||
+        !arena_background.ok || arena_background.w != 640 || arena_background.h != 360 ||
+        !kilix_sprite.ok || kilix_sprite.w != 384 || kilix_sprite.h != 384) {
+        snprintf(error, error_length,
+                 "required assets are missing or have unexpected dimensions");
+        render_shutdown();
+        return false;
+    }
+    /* Rival plates are optional at load: draw_opponent falls back to a colored
+     * blob if one is missing, so a stripped install still runs. */
+    for (int i = 0; i < OPPONENT_COUNT; i++)
+        opponent_sprites[i] = load_ppm(asset_path(OPPONENT_SPRITE_FILES[i]));
+    render_resize(width, height);
+    if (!output) {
+        snprintf(error, error_length, "could not allocate terminal framebuffer");
+        render_shutdown();
+        return false;
+    }
+    return true;
+}
+
+void render_resize(int width, int height)
+{
+    if (width < 1 || height < 1) return;
+    uint8_t *resized = realloc(output, (size_t)width * height * 4);
+    if (!resized) return;
+    output = resized;
+    output_width = width;
+    output_height = height;
+    G.W = width;
+    G.H = height;
+}
+
+void render_shutdown(void)
+{
+    free(canvas);
+    canvas = NULL;
+    free(output);
+    output = NULL;
+    free_bitmap(&ranch_background);
+    free_bitmap(&arena_background);
+    free_bitmap(&kilix_sprite);
+    for (int i = 0; i < OPPONENT_COUNT; i++)
+        free_bitmap(&opponent_sprites[i]);
+}
+
+void render_frame(void)
+{
+    clear_canvas(NIGHT);
+    switch (G.screen) {
+    case SCREEN_TITLE: draw_title(); break;
+    case SCREEN_NAMING: draw_naming(); break;
+    case SCREEN_RANCH: draw_ranch(); break;
+    case SCREEN_TRAINING: draw_training(); break;
+    case SCREEN_CARE: draw_care(); break;
+    case SCREEN_ARENA: draw_arena(); break;
+    case SCREEN_BATTLE: draw_battle(); break;
+    case SCREEN_EVENT: draw_event(); break;
+    case SCREEN_JOURNAL:
+    case SCREEN_CREDITS: draw_journal(); break;
+    case SCREEN_CHAMPION: draw_champion(); break;
+    default: draw_title(); break;
+    }
+    draw_toast_overlay();
+    float transition = 1.0f - smoothstep(0.0f, 0.28f, G.screen_time);
+    if (transition > 0.0f)
+        fill_rect(0, 0, LW, LH, NIGHT, transition);
+    scale_canvas_to_output();
+}
+
+bool render_dump_ppm(const char *path)
+{
+    if (!output || output_width <= 0 || output_height <= 0) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    fprintf(file, "P6\n%d %d\n255\n", output_width, output_height);
+    for (int y = 0; y < output_height; y++) {
+        for (int x = 0; x < output_width; x++) {
+            const uint8_t *pixel = output +
+                ((size_t)y * output_width + x) * 4;
+            fwrite(pixel, 1, 3, file);
+        }
+    }
+    /* Close unconditionally: the previous `!ferror(file) && fclose(...)`
+     * short-circuited past fclose when the stream had errored, leaking the
+     * FILE handle and fd. */
+    bool ok = !ferror(file);
+    if (fclose(file) != 0)
+        ok = false;
+    return ok;
+}
