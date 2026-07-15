@@ -20,9 +20,8 @@ IMAGE_ASSETS = assets/kilix.ppm assets/kilix_atlas.ppm \
 	assets/opponents/mossnub.ppm assets/opponents/dewdrop.ppm \
 	assets/opponents/mistwing.ppm assets/opponents/stonecalf.ppm \
 	assets/opponents/moonmoth.ppm assets/opponents/duskcub.ppm
-SFX_ASSETS = assets/sfx/move.wav assets/sfx/confirm.wav \
-	assets/sfx/train.wav assets/sfx/hit.wav assets/sfx/win.wav \
-	assets/sfx/lose.wav
+SFX_ASSETS := $(sort $(wildcard assets/sfx/*.wav))
+EXPECTED_SFX = 23
 RUNTIME_ASSETS = $(IMAGE_ASSETS) $(SFX_ASSETS)
 
 all: $(BIN)
@@ -42,6 +41,9 @@ src/%.o: src/%.c src/kilix.h
 validate-assets: $(BIN) $(RUNTIME_ASSETS)
 	./$(BIN) --validate-assets
 	@set -eu; \
+	[ "$$(find assets/sfx -maxdepth 1 -type f -name '*.wav' | wc -l)" \
+		-eq $(EXPECTED_SFX) ] || \
+		{ echo "expected $(EXPECTED_SFX) SFX WAVs" >&2; exit 1; }; \
 	for sound in $(SFX_ASSETS); do \
 		test "$$(dd if="$$sound" bs=1 count=4 2>/dev/null)" = RIFF; \
 		test "$$(dd if="$$sound" bs=1 skip=8 count=4 2>/dev/null)" = WAVE; \

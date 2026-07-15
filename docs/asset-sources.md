@@ -1,7 +1,8 @@
 # Asset provenance and generation record
 
-All project-specific runtime art and audio is original to Kilix Rancher and is
-distributed under the repository's MIT License to the extent applicable. No
+All project-specific runtime art is original to Kilix Rancher and is distributed
+under the repository's MIT License to the extent applicable. The generated
+sound effects have the separate bundled-game exception described below. No
 assets from *Monster Rancher* or another commercial game are included.
 
 ## Runtime visual assets
@@ -89,10 +90,36 @@ Avoid: colosseum realism, gore, weapons, dark horror mood, busy central detail, 
 
 ## Runtime audio assets
 
-`assets/sfx/*.wav` contains six original effects synthesized locally by
-`tools/generate_audio.sh` with deterministic SoX oscillators, filtering, and
-envelopes. No recordings, sample libraries, or third-party compositions are
-used. The effects are mono, 44.1 kHz, signed 16-bit PCM.
+The 23 WAV files under `assets/sfx/` form six no-immediate-repeat banks: warm
+wooden menu movement and confirmation, a rising training action, padded
+creature battle hits, a cheerful victory flourish, and a gentle setback cue.
+They were generated specifically for Kilix Rancher with ElevenLabs Text to
+Sound Effects v2 (`eleven_text_to_sound_v2`) during the account owner's paid
+Starter subscription.
+
+The production field contained 35 candidates. A pinned LAION CLAP model
+provided semantic triage, and candidate score arrays were identical across two
+independent runs. Signal-shape checks covered onset, event count, tails,
+stationary output, and clipping. Selected sources were decoded, onset-aligned,
+downmixed with equal power, trimmed or padded to exact runtime length,
+DC/high-pass cleaned, edge-faded, and reconstructed-peak gain-staged. No
+procedural layer, library sample, third-party recording, or music was mixed
+into the masters. Runtime files are mono 44.1 kHz signed 16-bit PCM WAV; all 23
+passed automated format, duration, headroom, silence/DC, fade, and duplicate
+checks.
+
+ElevenLabs states that qualifying paid-plan output may be used commercially
+and indefinitely, while its service-specific policy prohibits standalone
+commercial distribution or licensing of Sound Effects output. These WAVs are
+therefore excluded from the repository's MIT grant and included only as
+bundled Kilix Rancher content, not as a sample pack or sound library. Terms
+were checked on 2026-07-14: [paid-plan commercial
+use](https://help.elevenlabs.io/hc/en-us/articles/13313564601361-Can-I-publish-the-content-I-generate-on-the-platform),
+[Terms of Service](https://elevenlabs.io/terms-of-use), [Sound Effects
+Terms](https://elevenlabs.io/sound-effects-terms), and [Prohibited Use
+Policy](https://elevenlabs.io/use-policy). Exact prompts, source/final hashes,
+selection metrics, and mastering settings are in
+[`audio-provenance.json`](audio-provenance.json).
 
 ## Code provenance
 

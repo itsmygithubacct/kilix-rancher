@@ -25,7 +25,8 @@ directly inside Kilix, Kitty, WezTerm, Konsole, or another compatible terminal.
   move ranges, accuracy, evasion, defense, knockouts, and timed decisions
 - Responsive 960×540 logical presentation, full-screen illustrated scenes,
   particles, squash-and-stretch motion, flashes, and visual snapshots
-- Six original synthesized sound effects with silent fallback
+- Six cue-specific, no-immediate-repeat sound banks with 23 bundled warm UI,
+  training, battle-hit, victory, and setback variations, plus silent fallback
 - Deterministic simulation and headless render checks
 
 ## Build and play
@@ -107,8 +108,9 @@ creature-raising simulations. It does not ship characters, monsters, art,
 audio, text, data, or interface assets from *Monster Rancher* or another game.
 
 See [asset sources](docs/asset-sources.md) for the exact art prompts, processing
-pipeline, audio synthesis, and code provenance.
+pipeline, audio generation and mastering record, and code provenance.
 
-The project is MIT licensed. The terminal transport is adapted from the
-MIT-licensed `chess-bash` architecture; all game-specific code and assets here
-are Kilix Rancher originals.
+The code and project-specific visual assets are MIT licensed to the extent
+applicable. The ElevenLabs-generated WAVs have a separate bundled-game asset
+exception and are not standalone MIT samples. The terminal transport is
+adapted from the MIT-licensed `chess-bash` architecture.

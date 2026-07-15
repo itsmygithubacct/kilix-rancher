@@ -24,3 +24,15 @@ The terminal presentation architecture in src/term.c is derived from the
 MIT-licensed Chess Bash project (copyright 2026 itsmygithubacct). Its license
 terms are reproduced by this MIT notice and its provenance is recorded in
 docs/asset-sources.md.
+
+---
+
+Sound-effect asset exception
+
+The MIT License above does not apply to the ElevenLabs-generated WAV files in
+assets/sfx/. Those files are included solely as bundled components of Kilix
+Rancher, subject to the ElevenLabs Terms of Service, Sound Effects Terms, and
+Prohibited Use Policy. No permission is granted here to sell, distribute,
+license, sublicense, or otherwise exploit those sound effects on a standalone
+basis, including as isolated files, samples, or part of a sound library. See
+docs/asset-sources.md and docs/audio-provenance.json.

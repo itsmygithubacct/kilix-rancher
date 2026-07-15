@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -43,8 +44,49 @@ static const char *const SFX_FILES[SFX_COUNT] = {
     [SFX_LOSE] = "sfx/lose.wav"
 };
 
+static const uint8_t SFX_VARIANTS[SFX_COUNT] = {
+    [SFX_MOVE] = 4,
+    [SFX_CONFIRM] = 3,
+    [SFX_TRAIN] = 4,
+    [SFX_HIT] = 6,
+    [SFX_WIN] = 3,
+    [SFX_LOSE] = 3,
+};
+
+static uint8_t last_variants[SFX_COUNT];
+static uint32_t sound_rng = 0x4b17c4e5u;
+
 static PlayerKind player_kind;
 static char player_path[PATH_MAX];
+
+static uint32_t sound_random_u32(void)
+{
+    sound_rng ^= sound_rng << 13;
+    sound_rng ^= sound_rng >> 17;
+    sound_rng ^= sound_rng << 5;
+    return sound_rng;
+}
+
+static unsigned choose_variant(SoundId id)
+{
+    unsigned count = SFX_VARIANTS[id];
+    if (count <= 1) return 0;
+    unsigned variant;
+    do variant = sound_random_u32() % count;
+    while (variant == last_variants[id]);
+    last_variants[id] = (uint8_t)variant;
+    return variant;
+}
+
+static bool variant_filename(const char *base, unsigned variant,
+                             char *out, size_t size)
+{
+    if (variant == 0) return snprintf(out, size, "%s", base) < (int)size;
+    const char *extension = strrchr(base, '.');
+    if (!extension) return false;
+    return snprintf(out, size, "%.*s_v%02u%s", (int)(extension - base), base,
+                    variant + 1, extension) < (int)size;
+}
 
 static bool executable_in_path(const char *name, char *result, size_t result_size)
 {
@@ -158,6 +200,7 @@ bool sound_init(void)
 
     player_kind = PLAYER_NONE;
     player_path[0] = '\0';
+    memset(last_variants, 0xff, sizeof last_variants);
     if (G.headless) return false;
 
     for (i = 0; i < sizeof(PLAYER_CANDIDATES) / sizeof(PLAYER_CANDIDATES[0]); ++i) {
@@ -174,11 +217,15 @@ bool sound_init(void)
 void sound_play(SoundId id)
 {
     const char *wav_path;
+    char relative[96];
 
     if (G.headless || !G.sound_on || player_kind == PLAYER_NONE) return;
     if ((int)id < 0 || id >= SFX_COUNT || !SFX_FILES[id]) return;
 
-    wav_path = asset_path(SFX_FILES[id]);
+    if (!variant_filename(SFX_FILES[id], choose_variant(id), relative,
+                          sizeof relative))
+        return;
+    wav_path = asset_path(relative);
     if (!wav_path || access(wav_path, R_OK) != 0) return;
     spawn_player(wav_path);
 }
