@@ -40,6 +40,22 @@
 #define RHY_WINDOW   0.28f   /* max tap offset that still scores */
 #define RHY_APPROACH 0.80f   /* how long before a beat the bell swells */
 
+/* Ranch economy. Rent is 1000 g every 4-week month, paid up front, first month
+ * free; missing it is an eviction (game over). Hunger climbs every week and must
+ * be fed down with food, or a starving Kilix loses stats and form. */
+#define MONTH_WEEKS   4
+#define RENT_AMOUNT   1000
+#define BANK_ACTIONS  6     /* deposit 100/500/all, withdraw 100/500/all */
+#define HUNGER_PER_WEEK 14
+#define HUNGER_WARN   75    /* peckish: a small weekly toll */
+#define HUNGER_STARVE 90    /* starving: stats and form decay each week */
+
+/* Paid coaching (Academy): a guaranteed stat gain for gold and one week, shown
+ * as a short training montage before the result. */
+#define ACADEMY_COST  300
+#define ACADEMY_GAIN  9
+#define ACADEMY_ANIM  2.2f  /* seconds of training animation */
+
 enum {
     KEY_ENTER = 1000,
     KEY_BACKSPACE,
@@ -63,7 +79,10 @@ typedef enum {
     SCREEN_JOURNAL,
     SCREEN_CREDITS,
     SCREEN_CHAMPION,
-    SCREEN_DRILL
+    SCREEN_DRILL,
+    SCREEN_ACADEMY,   /* paid coaching: buy a guaranteed stat gain */
+    SCREEN_DOJO,      /* learn battle moves for gold */
+    SCREEN_BANK       /* set gold aside so rent is always covered */
 } Screen;
 
 /* One skill mini-game per drill, chosen by the drill's primary stat. */
@@ -128,7 +147,9 @@ typedef enum {
     EVENT_REST,
     EVENT_FEED,
     EVENT_BATTLE_RESULT,
-    EVENT_RANK_UP
+    EVENT_RANK_UP,
+    EVENT_RENT,        /* the monthly rent collector calls */
+    EVENT_EVICTION     /* rent went unpaid: the run is over */
 } EventKind;
 
 typedef enum {
@@ -160,6 +181,7 @@ typedef struct {
     int stress;
     int bond;
     int form;
+    int hunger;                /* 0 full .. 100 starving; climbs weekly */
     int age_weeks;
     int rank;
     int rank_wins;
@@ -189,17 +211,19 @@ typedef struct {
     int stress;
     int bond;
     int form;
+    int satiety;               /* how much the food lowers hunger (0 = not food) */
 } ItemInfo;
 
 typedef struct {
     const char *name;
     const char *description;
-    int cost;
+    int cost;                  /* Will (guts) spent to use the move in battle */
     int power;
     int accuracy;
     float min_range;
     float max_range;
     StatKind scaling;
+    int price;                 /* gold to learn it; 0 = known from the start */
 } MoveInfo;
 
 typedef struct {
@@ -268,6 +292,12 @@ typedef struct {
     int drill_cursor;
     int care_cursor;
     int arena_cursor;
+    int academy_cursor;        /* Academy: which stat to coach */
+    int dojo_cursor;           /* Dojo: which move to learn */
+    int bank_cursor;           /* Bank: which deposit/withdraw action */
+    int academy_phase;         /* 0 menu, 1 playing the training montage */
+    float academy_clock;       /* montage timer */
+    int academy_choice;        /* the stat being coached during the montage */
     int journal_page;
 
     float time;
@@ -279,6 +309,9 @@ typedef struct {
 
     int total_weeks;
     int money;
+    int bank;                  /* rent savings; rent is drawn from here first */
+    uint32_t moves_known;      /* bitmask of learned MOVES[]; bit 0 always set */
+    int rent_paid_weeks;       /* rent covers up to this week; first month free */
     Monster kilix;
     EventState event;
     BattleState battle;

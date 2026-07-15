@@ -47,6 +47,7 @@ static const char *const OPPONENT_ATLAS_FILES[OPPONENT_COUNT] = {
  * optional, with procedural fallbacks. */
 static Bitmap care_sprites[ITEM_COUNT];
 static Bitmap journal_background;
+static Bitmap rent_sprite;       /* the monthly rent collector */
 static const char *const CARE_SPRITE_FILES[ITEM_COUNT] = {
     "care/stew.ppm", "care/brush.ppm", "care/tonic.ppm", "care/treat.ppm",
 };
@@ -913,17 +914,29 @@ static void draw_ranch_status(void)
         draw_stat_row(728, 183 + stat * 27, 185, (StatKind)stat,
                       G.kilix.stats.value[stat]);
 
-    fill_rect(726, 351, 190, 2, 0xC7A65B, 0.6f);
+    fill_rect(726, 348, 190, 2, 0xC7A65B, 0.6f);
     char value[64];
     snprintf(value, sizeof value, "BOND  %d%%", G.kilix.bond);
-    draw_progress_bar(728, 367, 185, 20, G.kilix.bond, 100, 0xE98A5C, value);
+    draw_progress_bar(728, 354, 185, 18, G.kilix.bond, 100, 0xE98A5C, value);
     snprintf(value, sizeof value, "FATIGUE  %d%%", G.kilix.fatigue);
-    draw_progress_bar(728, 394, 185, 20, G.kilix.fatigue, 100,
+    draw_progress_bar(728, 376, 185, 18, G.kilix.fatigue, 100,
                       G.kilix.fatigue > 70 ? CORAL : 0x6CA69C, value);
+    snprintf(value, sizeof value, "HUNGER  %d%%", G.kilix.hunger);
+    draw_progress_bar(728, 398, 185, 18, G.kilix.hunger, 100,
+                      G.kilix.hunger >= HUNGER_STARVE ? 0xE0533A :
+                      G.kilix.hunger >= HUNGER_WARN ? CORAL : 0x6CA69C, value);
     snprintf(value, sizeof value, "RATING %d   AGE %dY %dW",
              game_overall_rating(), G.kilix.age_weeks / 48,
              G.kilix.age_weeks % 48);
-    draw_text(730, 428, value, 0xD7C18C, 0.9f, 1);
+    draw_text(730, 422, value, 0xD7C18C, 0.85f, 1);
+    /* Rent countdown: how many weeks until the collector next calls. */
+    int weeks_left = G.rent_paid_weeks - G.total_weeks;
+    if (weeks_left < 0) weeks_left = 0;
+    if (weeks_left == 0)
+        snprintf(value, sizeof value, "RENT %d G  DUE NOW", RENT_AMOUNT);
+    else
+        snprintf(value, sizeof value, "RENT %d G  IN %d WK", RENT_AMOUNT, weeks_left);
+    draw_text(730, 440, value, weeks_left <= 1 ? CORAL : 0xE0B060, 0.9f, 1);
 }
 
 static void draw_ranch(void)
@@ -933,16 +946,18 @@ static void draw_ranch(void)
     draw_header("HEARTHSIDE RANCH");
 
     panel(24, 68, 264, 390, NIGHT, 0.89f);
-    draw_text(48, 88, "THIS WEEK", GOLD, 1.0f, 2);
-    draw_text(49, 113, "ONE CHOICE MOVES TIME FORWARD", CREAM, 0.66f, 1);
+    draw_text(48, 86, "THIS WEEK", GOLD, 1.0f, 2);
+    draw_text(49, 108, "ONE CHOICE MOVES TIME FORWARD", CREAM, 0.66f, 1);
     static const char *labels[] = {
-        "DRILLS", "CATNAP", "CARE BASKET", "FESTIVAL ARENA", "JOURNAL", "SAVE & STAY"
+        "DRILLS", "ACADEMY", "DOJO", "BANK", "CATNAP", "CARE BASKET",
+        "FESTIVAL ARENA", "JOURNAL", "SAVE & STAY"
     };
     static const char *hints[] = {
-        "+ STATS", "- FATIGUE", "FOOD", "LEAGUE", "INFO", "SAVE"
+        "+ STATS", "PAID +STAT", "LEARN", "RENT", "- FATIGUE", "FOOD",
+        "LEAGUE", "INFO", "SAVE"
     };
-    for (int i = 0; i < 6; i++)
-        draw_choice(48, 140 + i * 48, 214, 39, labels[i], hints[i],
+    for (int i = 0; i < 9; i++)
+        draw_choice(48, 120 + i * 37, 214, 31, labels[i], hints[i],
                     G.cursor == i, true);
 
     int pose = ranch_pose();
@@ -1210,20 +1225,29 @@ static void draw_move_cards(void)
     for (int i = 0; i < MOVE_COUNT; i++) {
         int x = 202 + i * 183;
         bool selected = G.battle.selected_move == i;
+        bool known = (G.moves_known & (1u << i)) != 0;
         bool affordable = G.battle.player_guts >= MOVES[i].cost;
         float range = G.battle.distance * 100.0f;
         bool in_range = range >= MOVES[i].min_range && range <= MOVES[i].max_range;
+        bool ready = known && affordable && in_range;
         rounded_rect(x, 445, 168, 72, 9,
                      selected ? ORANGE : 0x20333A,
-                     selected ? 0.96f : 0.9f);
+                     selected ? 0.96f : (known ? 0.9f : 0.72f));
         if (selected) fill_rect(x + 5, 451, 3, 59, GOLD, 0.95f);
         char number[16];
         snprintf(number, sizeof number, "%d", i + 1);
         fill_circle(x + 21, 464, 12, selected ? GOLD : 0x41575C, 1.0f);
         draw_text_center(x + 21, 460, number, INK, 1.0f, 1);
         draw_text(x + 41, 456, MOVES[i].name,
-                  affordable && in_range ? CREAM : 0x8E9390,
-                  affordable ? 1.0f : 0.58f, 1);
+                  ready ? CREAM : 0x8E9390, known ? 1.0f : 0.55f, 1);
+        if (!known) {
+            /* Locked until bought at the Dojo. */
+            char lock[40];
+            snprintf(lock, sizeof lock, "LOCKED - %d g", MOVES[i].price);
+            draw_text(x + 16, 485, lock, 0x9CA49E, 0.7f, 1);
+            draw_text(x + 16, 501, "LEARN AT THE DOJO", 0xCE9468, 0.85f, 1);
+            continue;
+        }
         char detail[48];
         snprintf(detail, sizeof detail, "%d WILL  %02d-%02d RANGE",
                  MOVES[i].cost, (int)MOVES[i].min_range,
@@ -1232,7 +1256,7 @@ static void draw_move_cards(void)
                   in_range ? GOLD : 0x9CA49E, in_range ? 0.95f : 0.62f, 1);
         draw_text(x + 16, 501,
                   !in_range ? "OUT OF RANGE" : !affordable ? "NEED WILL" : "READY",
-                  in_range && affordable ? 0x9DDBB4 : CORAL, 0.9f, 1);
+                  ready ? 0x9DDBB4 : CORAL, 0.9f, 1);
     }
 }
 
@@ -1359,6 +1383,22 @@ static void draw_event(void)
         }
         for (int i = 0; i < 4; i++)
             draw_ember(250 + i * 12, 300 + (i & 1) * 8, G.time * 3 + i, 2.2f);
+    } else if (G.event.kind == EVENT_RENT || G.event.kind == EVENT_EVICTION) {
+        bool evicted = G.event.kind == EVENT_EVICTION;
+        float bob = sinf(G.time * 2.0f) * 5.0f;
+        /* The ranch collector calls for the monthly rent. */
+        if (rent_sprite.ok)
+            draw_bitmap_scaled(&rent_sprite, 150, (int)(214 + bob), 250, 250,
+                               false, evicted ? 0x8A6A6A : 0xFFFFFF,
+                               evicted ? 0.28f : 0.0f, 1.0f);
+        else {
+            fill_circle(250, 336, 58, 0x8A6A44, 1.0f);
+            draw_text_center(250, 320, "G", GOLD, 1.0f, 4);
+        }
+        draw_kilix(720, 475, 320, false, evicted ? 2 : 0);
+        if (!evicted)
+            for (int i = 0; i < 5; i++)
+                draw_ember(432 + i * 10, 262 + (i & 1) * 12, G.time * 3 + i, 2.4f);
     } else {
         draw_kilix(315, 462, 285, false,
                    G.event.success || G.event.kind == EVENT_RANK_UP ? 1 : 2);
@@ -1377,9 +1417,13 @@ static void draw_event(void)
 
     if (G.event.kind == EVENT_TRAIN && G.event.success) {
         char gains[128];
-        snprintf(gains, sizeof gains, "%s +%d     %s +%d",
-                 STAT_NAMES[G.event.primary], G.event.gain_primary,
-                 STAT_NAMES[G.event.secondary], G.event.gain_secondary);
+        if (G.event.gain_secondary > 0)   /* drills give two stats; coaching, one */
+            snprintf(gains, sizeof gains, "%s +%d     %s +%d",
+                     STAT_NAMES[G.event.primary], G.event.gain_primary,
+                     STAT_NAMES[G.event.secondary], G.event.gain_secondary);
+        else
+            snprintf(gains, sizeof gains, "%s +%d",
+                     STAT_NAMES[G.event.primary], G.event.gain_primary);
         rounded_rect(105, 226, 390, 41, 9, 0x17383A, 0.88f * reveal);
         draw_text_center(300, 241, gains, 0xA7E0BC, reveal, 1);
     }
@@ -1601,6 +1645,7 @@ bool render_init(int width, int height, char *error, size_t error_length)
     for (int i = 0; i < STAT_COUNT; i++)
         drill_icons[i] = load_ppm(asset_path(DRILL_ICON_FILES[i]));
     journal_background = load_ppm(asset_path("journal.ppm"));
+    rent_sprite = load_ppm(asset_path("rent.ppm"));
     mg_board = load_ppm(asset_path("minigame/board.ppm"));
     mg_num[0] = load_ppm(asset_path("minigame/num1.ppm"));
     mg_num[1] = load_ppm(asset_path("minigame/num2.ppm"));
@@ -1649,6 +1694,7 @@ void render_shutdown(void)
     for (int i = 0; i < STAT_COUNT; i++)
         free_bitmap(&drill_icons[i]);
     free_bitmap(&journal_background);
+    free_bitmap(&rent_sprite);
     free_bitmap(&mg_board);
     for (int i = 0; i < 3; i++)
         free_bitmap(&mg_num[i]);
@@ -1924,6 +1970,135 @@ static void draw_drill(void)
     }
 }
 
+static void draw_academy(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.06f);
+    draw_ambient_embers(14, 0.7f);
+    draw_header("ACADEMY - PAID COACHING");
+
+    if (G.academy_phase == 1) {
+        /* A short training montage plays before the guaranteed gain lands. */
+        float t = clampf(G.academy_clock / ACADEMY_ANIM, 0.0f, 1.0f);
+        int poses[4] = {1, 3, 1, 0};
+        int pose = poses[(int)(G.academy_clock / 0.28f) % 4];
+        draw_kilix(480, 472, 380, false, pose);
+        for (int i = 0; i < 10; i++)
+            draw_ember(330 + i * 24, 250 + (i & 3) * 20, G.time * 4 + i, 3.0f);
+        int stat = clampi(G.academy_choice, 0, STAT_COUNT - 1);
+        char cap[64];
+        snprintf(cap, sizeof cap, "COACHING %s", STAT_NAMES[stat]);
+        panel(300, 78, 360, 110, NIGHT, 0.9f);
+        draw_text_center(480, 98, cap, GOLD, 1.0f, 3);
+        draw_progress_bar(330, 146, 300, 20, t, 1.0f, 0x6AC18D, "TRAINING...");
+        draw_footer("A FOCUSED SESSION IN PROGRESS...");
+        return;
+    }
+
+    panel(40, 96, 372, 372, NIGHT, 0.9f);
+    draw_text(64, 116, "CHOOSE A FOCUS", GOLD, 1.0f, 2);
+    char sub[80];
+    snprintf(sub, sizeof sub, "%d G   GUARANTEED +%d   ONE WEEK",
+             ACADEMY_COST, ACADEMY_GAIN);
+    draw_text(65, 142, sub, CREAM, 0.66f, 1);
+    for (int s = 0; s < STAT_COUNT; s++) {
+        char cur[24];
+        snprintf(cur, sizeof cur, "%d", G.kilix.stats.value[s]);
+        draw_choice(64, 162 + s * 47, 324, 40, STAT_NAMES[s], cur,
+                    G.academy_cursor == s, true);
+    }
+    draw_kilix(700, 472, 350, false, 1);
+    char money[48];
+    snprintf(money, sizeof money, "RANCH FUNDS  %d G", G.money);
+    draw_text_center(690, 130, money,
+                     G.money >= ACADEMY_COST ? GOLD : CORAL, 1.0f, 2);
+    draw_footer("ARROWS  CHOOSE     ENTER  TRAIN (-300 G)     ESC  BACK");
+}
+
+static void draw_dojo(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.06f);
+    draw_ambient_embers(14, 0.7f);
+    draw_header("DOJO - LEARN NEW ATTACKS");
+
+    panel(40, 96, 470, 372, NIGHT, 0.9f);
+    draw_text(64, 116, "MOVE SCROLLS", GOLD, 1.0f, 2);
+    draw_text(65, 142, "BUY AN ATTACK ONCE; KEEP IT FOR EVERY BATTLE.",
+              CREAM, 0.62f, 1);
+    for (int i = 0; i < MOVE_COUNT; i++) {
+        int y = 160 + i * 66;
+        bool sel = G.dojo_cursor == i;
+        bool known = (G.moves_known & (1u << i)) != 0;
+        rounded_rect(60, y, 428, 58, 9, sel ? ORANGE : NIGHT, sel ? 0.94f : 0.7f);
+        if (sel) fill_rect(66, y + 6, 3, 46, GOLD, 0.9f);
+        draw_text(80, y + 8, MOVES[i].name, known ? 0x9DDBB4 : CREAM, 1.0f, 2);
+        char meta[64];
+        snprintf(meta, sizeof meta, "PWR %d   WILL %d   RANGE %02d-%02d",
+                 MOVES[i].power, MOVES[i].cost, (int)MOVES[i].min_range,
+                 (int)MOVES[i].max_range);
+        draw_text(80, y + 34, meta, 0xB9C4B4, 0.7f, 1);
+        char tag[32];
+        if (known) snprintf(tag, sizeof tag, "LEARNED");
+        else snprintf(tag, sizeof tag, "%d G", MOVES[i].price);
+        draw_text_right(478, y + 16, tag,
+                        known ? 0x9DDBB4
+                              : (G.money >= MOVES[i].price ? GOLD : CORAL),
+                        1.0f, 2);
+    }
+
+    int sel = clampi(G.dojo_cursor, 0, MOVE_COUNT - 1);
+    panel(528, 96, 400, 300, NIGHT, 0.9f);
+    draw_text(548, 116, MOVES[sel].name, GOLD, 1.0f, 3);
+    draw_wrapped_text(548, 154, 360, MOVES[sel].description, CREAM, 0.9f, 1, 4);
+    draw_kilix(728, 468, 300, false, 3);
+    char money[48];
+    snprintf(money, sizeof money, "RANCH FUNDS  %d G", G.money);
+    draw_text_center(728, 412, money, GOLD, 1.0f, 2);
+    draw_footer("ARROWS  CHOOSE     ENTER  LEARN     ESC  BACK");
+}
+
+static void draw_bank(void)
+{
+    draw_bitmap_cover(&ranch_background, 0.06f);
+    draw_ambient_embers(14, 0.7f);
+    draw_header("BANK - RENT SAVINGS");
+
+    char line[80];
+    panel(40, 96, 430, 158, NIGHT, 0.9f);
+    snprintf(line, sizeof line, "COFFERS   %d G", G.money);
+    draw_text(64, 116, line, GOLD, 1.0f, 2);
+    snprintf(line, sizeof line, "RENT VAULT   %d G", G.bank);
+    draw_text(64, 148, line, 0x8FD1B5, 1.0f, 2);
+
+    int weeks_left = G.rent_paid_weeks - G.total_weeks;
+    if (weeks_left < 0) weeks_left = 0;
+    if (weeks_left == 0)
+        snprintf(line, sizeof line, "RENT %d G IS DUE NOW", RENT_AMOUNT);
+    else
+        snprintf(line, sizeof line, "NEXT RENT  %d G  IN %d WK", RENT_AMOUNT,
+                 weeks_left);
+    draw_text(64, 194, line, weeks_left <= 1 ? CORAL : CREAM, 0.95f, 1);
+    bool vault_covers = G.bank >= RENT_AMOUNT;
+    bool covered = G.bank + G.money >= RENT_AMOUNT;
+    draw_text(64, 214,
+              vault_covers ? "THE VAULT COVERS THE NEXT RENT" :
+              covered ? "COFFERS WILL COVER THE SHORTFALL" :
+              "WARNING: NEXT RENT CANNOT BE PAID",
+              vault_covers ? 0x9DDBB4 : covered ? 0xE0B060 : CORAL, 0.9f, 1);
+
+    static const char *acts[BANK_ACTIONS] = {
+        "DEPOSIT 100", "DEPOSIT 500", "DEPOSIT ALL",
+        "WITHDRAW 100", "WITHDRAW 500", "WITHDRAW ALL"
+    };
+    for (int i = 0; i < BANK_ACTIONS; i++)
+        draw_choice(64, 268 + i * 33, 406, 28, acts[i], "",
+                    G.bank_cursor == i, true);
+
+    if (rent_sprite.ok)
+        draw_bitmap_scaled(&rent_sprite, 588, 150, 300, 300, false,
+                           0xFFFFFF, 0.0f, 1.0f);
+    draw_footer("ARROWS  CHOOSE     ENTER  CONFIRM     ESC  BACK");
+}
+
 void render_frame(void)
 {
     clear_canvas(NIGHT);
@@ -1936,6 +2111,9 @@ void render_frame(void)
     case SCREEN_ARENA: draw_arena(); break;
     case SCREEN_BATTLE: draw_battle(); break;
     case SCREEN_DRILL: draw_drill(); break;
+    case SCREEN_ACADEMY: draw_academy(); break;
+    case SCREEN_DOJO: draw_dojo(); break;
+    case SCREEN_BANK: draw_bank(); break;
     case SCREEN_EVENT: draw_event(); break;
     case SCREEN_JOURNAL:
     case SCREEN_CREDITS: draw_journal(); break;

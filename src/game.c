@@ -20,7 +20,7 @@
 #define WEEKS_PER_YEAR 48
 #define WEEKS_PER_SEASON 12
 #define BATTLE_SECONDS 60.0f
-#define SAVE_VERSION 2u
+#define SAVE_VERSION 3u
 #define SAVE_MONEY_MAX 99999999
 #define SAVE_WEEKS_MAX 10000000
 
@@ -70,38 +70,38 @@ const DrillInfo DRILLS[DRILL_COUNT] = {
 const ItemInfo ITEMS[ITEM_COUNT] = {
     {
         "Hearth Stew", "A filling root-and-fish stew that restores a tired Kilix.",
-        90, -10, -5, 4, 8
+        90, -10, -5, 4, 8, 55
     },
     {
         "Moonmint Brush", "A cool grooming session that eases worry and builds trust.",
-        70, -4, -18, 7, 4
+        70, -4, -18, 7, 4, 0
     },
     {
         "Coolleaf Tonic", "A ranch remedy for heavy paws and an overheated flame.",
-        130, -25, -9, 2, 10
+        130, -25, -9, 2, 10, 18
     },
     {
         "Starcoal Treat", "A rare sparkling morsel that brightens form and friendship.",
-        180, 2, -12, 10, 15
+        180, 2, -12, 10, 15, 35
     }
 };
 
 const MoveInfo MOVES[MOVE_COUNT] = {
     {
         "Coal Claw", "A quick close-range swipe with a glowing paw.",
-        18, 22, 91, 0.0f, 34.0f, STAT_POWER
+        18, 22, 91, 0.0f, 34.0f, STAT_POWER, 0
     },
     {
         "Ember Pounce", "A springing tackle that crosses a short gap.",
-        24, 31, 83, 18.0f, 58.0f, STAT_POWER
+        24, 31, 83, 18.0f, 58.0f, STAT_POWER, 500
     },
     {
         "Whisker Flare", "A curved tongue of fire cast across the arena.",
-        31, 40, 77, 43.0f, 82.0f, STAT_INTELLECT
+        31, 40, 77, 43.0f, 82.0f, STAT_INTELLECT, 1100
     },
     {
         "Little Sunrise", "Kilix gathers its courage into one far-flying spark.",
-        40, 53, 69, 68.0f, 100.0f, STAT_INTELLECT
+        40, 53, 69, 68.0f, 100.0f, STAT_INTELLECT, 2000
     }
 };
 
@@ -167,6 +167,8 @@ static void begin_event(EventKind kind, const char *title, const char *detail);
 static void perform_drill(int index);
 static void perform_rest(void);
 static void use_care_item(int index);
+static void academy_finish(void);
+static bool present_rent_event(void);
 static void battle_tick(float dt);
 static void settle_battle(void);
 
@@ -301,6 +303,18 @@ static void change_screen(Screen screen)
         G.arena_cursor = clampi(G.arena_cursor, 0, OPPONENT_COUNT - 1);
         G.cursor = G.arena_cursor;
         break;
+    case SCREEN_ACADEMY:
+        G.academy_cursor = clampi(G.academy_cursor, 0, STAT_COUNT - 1);
+        G.cursor = G.academy_cursor;
+        break;
+    case SCREEN_DOJO:
+        G.dojo_cursor = clampi(G.dojo_cursor, 0, MOVE_COUNT - 1);
+        G.cursor = G.dojo_cursor;
+        break;
+    case SCREEN_BANK:
+        G.bank_cursor = clampi(G.bank_cursor, 0, BANK_ACTIONS - 1);
+        G.cursor = G.bank_cursor;
+        break;
     default:
         break;
     }
@@ -327,6 +341,7 @@ static void normalize_monster(Monster *monster)
     monster->stress = clampi(monster->stress, 0, 100);
     monster->bond = clampi(monster->bond, 0, 100);
     monster->form = clampi(monster->form, 0, 100);
+    monster->hunger = clampi(monster->hunger, 0, 100);
     monster->age_weeks = clampi(monster->age_weeks, 0, SAVE_WEEKS_MAX);
     monster->rank = clampi(monster->rank, 0, RANK_COUNT - 1);
     monster->rank_wins = clampi(monster->rank_wins, 0, SAVE_WEEKS_MAX);
@@ -341,6 +356,7 @@ static void normalize_game(void)
     normalize_monster(&G.kilix);
     G.total_weeks = clampi(G.total_weeks, 0, SAVE_WEEKS_MAX);
     G.money = clampi(G.money, 0, SAVE_MONEY_MAX);
+    G.bank = clampi(G.bank, 0, SAVE_MONEY_MAX);
     if (G.kilix.age_weeks != G.total_weeks)
         G.kilix.age_weeks = G.total_weeks;
     if (G.rng == 0)
@@ -380,6 +396,7 @@ void game_new_ranch(const char *name)
     monster.stress = 5;
     monster.bond = 45;
     monster.form = 72;
+    monster.hunger = 20;
     monster.rank = 0;
     personality = rng_next();
     monster.personality_seed = personality ? personality : 0x51f15e5du;
@@ -387,6 +404,9 @@ void game_new_ranch(const char *name)
     G.kilix = monster;
     G.total_weeks = 0;
     G.money = 1200;
+    G.bank = 0;
+    G.moves_known = 1u;                 /* only the basic Coal Claw to start */
+    G.rent_paid_weeks = MONTH_WEEKS;    /* the first month is on the house */
     memset(&G.event, 0, sizeof(G.event));
     memset(&G.battle, 0, sizeof(G.battle));
     G.battle.opponent = -1;
@@ -472,6 +492,19 @@ void game_advance_week(void)
         G.kilix.form -= 4;
     else if (G.kilix.fatigue <= 30 && G.kilix.stress <= 35)
         G.kilix.form += 1;
+
+    /* Appetite grows every week. A starving Kilix (fed too little) actively
+     * loses condition and stats; a merely peckish one just frets a little. */
+    G.kilix.hunger += HUNGER_PER_WEEK;
+    if (G.kilix.hunger >= HUNGER_STARVE) {
+        int s;
+        for (s = 0; s < STAT_COUNT; ++s)
+            G.kilix.stats.value[s] -= 1;
+        G.kilix.form -= 6;
+        G.kilix.bond -= 3;
+    } else if (G.kilix.hunger >= HUNGER_WARN) {
+        G.kilix.form -= 2;
+    }
 
     if (G.total_weeks % WEEKS_PER_SEASON == 0)
         G.kilix.bond += 1;
@@ -902,16 +935,137 @@ static void use_care_item(int index)
     G.kilix.stress += item->stress;
     G.kilix.bond += item->bond;
     G.kilix.form += item->form;
+    G.kilix.hunger -= item->satiety;    /* food fills the belly; a brush does not */
     normalize_game();
     game_advance_week();
-    snprintf(detail, sizeof(detail),
-             "%s enjoyed the %s. Bond %+d, form %+d, stress %+d.",
-             G.kilix.name, item->name, item->bond, item->form, item->stress);
+    if (item->satiety > 0)
+        snprintf(detail, sizeof(detail),
+                 "%s devoured the %s. Hunger -%d, bond %+d, form %+d.",
+                 G.kilix.name, item->name, item->satiety, item->bond, item->form);
+    else
+        snprintf(detail, sizeof(detail),
+                 "%s enjoyed the %s. Bond %+d, form %+d, stress %+d.",
+                 G.kilix.name, item->name, item->bond, item->form, item->stress);
     begin_event(EVENT_FEED, item->name, detail);
     G.event.index = index;
     G.event.success = true;
     G.event.money_delta = -item->cost;
     play_sound(SFX_CONFIRM);
+}
+
+/* ---- Dojo: learn battle moves for gold (instant, no week) --------------- */
+static void learn_move(int index)
+{
+    char toast[160];
+
+    if (index < 0 || index >= MOVE_COUNT) {
+        game_show_toast("That move is not on the dojo's list.");
+        return;
+    }
+    if (G.moves_known & (1u << index)) {       /* incl. MOVES[0], the free basic */
+        game_show_toast("Kilix already knows that move.");
+        play_sound(SFX_MOVE);
+        return;
+    }
+    if (G.money < MOVES[index].price) {
+        game_show_toast("Not enough gold to learn that move.");
+        play_sound(SFX_MOVE);
+        return;
+    }
+    G.money -= MOVES[index].price;
+    G.moves_known |= (1u << index);
+    normalize_game();
+    if (!suppress_autosave)
+        game_save();                           /* a purchase should persist */
+    snprintf(toast, sizeof(toast), "%s learned %s!", G.kilix.name,
+             MOVES[index].name);
+    game_show_toast(toast);
+    play_sound(SFX_CONFIRM);
+}
+
+/* ---- Academy: paid coaching — a guaranteed stat gain, costs a week ------- */
+static void academy_begin(int stat)
+{
+    if (stat < 0 || stat >= STAT_COUNT)
+        return;
+    if (G.money < ACADEMY_COST) {
+        game_show_toast("Not enough gold for a coaching session.");
+        play_sound(SFX_MOVE);
+        return;
+    }
+    G.money -= ACADEMY_COST;
+    G.academy_choice = stat;
+    G.academy_phase = 1;           /* run the montage; the gain lands on finish */
+    G.academy_clock = 0.0f;
+    play_sound(SFX_TRAIN);
+}
+
+static void academy_finish(void)
+{
+    int stat = clampi(G.academy_choice, 0, STAT_COUNT - 1);
+    char detail[192];
+
+    G.academy_phase = 0;
+    G.kilix.stats.value[stat] += ACADEMY_GAIN;
+    G.kilix.fatigue += 10;
+    normalize_game();
+    game_advance_week();
+    snprintf(detail, sizeof(detail),
+             "A focused coaching session pays off. %s %+d, fatigue +10.",
+             STAT_NAMES[stat], ACADEMY_GAIN);
+    begin_event(EVENT_TRAIN, "Coaching Session", detail);
+    G.event.index = stat;          /* stat index == its drill emblem index */
+    G.event.primary = (StatKind)stat;
+    G.event.gain_primary = ACADEMY_GAIN;
+    G.event.success = true;
+    play_sound(SFX_WIN);
+}
+
+/* ---- Bank: set gold aside so rent is always covered -------------------- */
+static void bank_move(int amount)
+{
+    if (amount > 0) {                          /* deposit coffers -> vault */
+        int m = amount > G.money ? G.money : amount;
+        if (m > SAVE_MONEY_MAX - G.bank)        /* cap so nothing overflows away */
+            m = SAVE_MONEY_MAX - G.bank;
+        if (m <= 0) {
+            game_show_toast("No gold in the coffers to deposit.");
+            play_sound(SFX_MOVE);
+            return;
+        }
+        G.money -= m;
+        G.bank += m;
+    } else if (amount < 0) {                    /* withdraw vault -> coffers */
+        int w = -amount > G.bank ? G.bank : -amount;
+        if (w > SAVE_MONEY_MAX - G.money)
+            w = SAVE_MONEY_MAX - G.money;
+        if (w <= 0) {
+            game_show_toast("The rent vault is empty.");
+            play_sound(SFX_MOVE);
+            return;
+        }
+        G.bank -= w;
+        G.money += w;
+    } else {
+        return;
+    }
+    normalize_game();
+    if (!suppress_autosave)
+        game_save();                            /* a transfer should persist */
+    play_sound(SFX_CONFIRM);
+}
+
+static void bank_action(int which)
+{
+    switch (which) {
+    case 0: bank_move(100); break;
+    case 1: bank_move(500); break;
+    case 2: bank_move(G.money); break;          /* deposit everything */
+    case 3: bank_move(-100); break;
+    case 4: bank_move(-500); break;
+    case 5: bank_move(-G.bank); break;          /* withdraw everything */
+    default: break;
+    }
 }
 
 void game_go_ranch(void)
@@ -1094,6 +1248,11 @@ void game_use_move(int move_index)
     }
     battle->selected_move = move_index;
     move = &MOVES[move_index];
+    if (!(G.moves_known & (1u << move_index))) {
+        game_show_toast("Kilix has not learned that move. Visit the Dojo.");
+        play_sound(SFX_MOVE);
+        return;
+    }
     if (battle->player_cooldown > 0.0f) {
         game_show_toast("Wait for an opening.");
         return;
@@ -1146,6 +1305,8 @@ static int player_preferred_move(void)
     BattleState *battle = &G.battle;
     int best = -1;
     for (int i = MOVE_COUNT - 1; i >= 0; --i) {
+        if (!(G.moves_known & (1u << i)))          /* only moves Kilix has learned */
+            continue;
         if (battle->player_guts + 0.001f < MOVES[i].cost)
             continue;
         if (move_in_range(&MOVES[i], battle->distance))
@@ -1368,6 +1529,11 @@ static void forfeit_battle(void)
     G.kilix.form -= 5;
     normalize_game();
     game_advance_week();
+    /* A forfeited match still spends the week, so it must face the rent check
+     * like every other week-advancing action, or repeated forfeits would let a
+     * broke player dodge rent and eviction forever. */
+    if (present_rent_event())
+        return;
     game_go_ranch();
     game_show_toast("The match was forfeited. Kilix returned safely to the ranch.");
     play_sound(SFX_LOSE);
@@ -1390,6 +1556,55 @@ static void cancel_battle(void)
     play_sound(SFX_MOVE);
 }
 
+typedef enum { RENT_NOT_DUE, RENT_PAID, RENT_EVICTED } RentResult;
+
+/* Pure rent bookkeeping: once the paid-through period has elapsed, charge one
+ * month up front. No screen/UI side effects, so the selftest drives it directly.
+ * On failure the paid-through week is left untouched (rent is still owed). */
+static RentResult try_collect_rent(void)
+{
+    if (G.total_weeks < G.rent_paid_weeks)
+        return RENT_NOT_DUE;
+    if (G.bank + G.money >= RENT_AMOUNT) {
+        /* Spend the rent savings first, then the coffers for any shortfall. */
+        int from_bank = G.bank >= RENT_AMOUNT ? RENT_AMOUNT : G.bank;
+        G.bank -= from_bank;
+        G.money -= (RENT_AMOUNT - from_bank);
+        G.rent_paid_weeks += MONTH_WEEKS;
+        return RENT_PAID;
+    }
+    return RENT_EVICTED;
+}
+
+/* Resolve any rent due and raise the matching event. Returns true when an event
+ * is now on screen, so the caller stops instead of falling through to the ranch. */
+static bool present_rent_event(void)
+{
+    char detail[192];
+    RentResult result = try_collect_rent();
+
+    if (result == RENT_NOT_DUE)
+        return false;
+    if (result == RENT_PAID) {
+        snprintf(detail, sizeof(detail),
+                 "The ranch collector calls. Rent of %d g is paid up front for "
+                 "the coming month. Vault holds %d g, coffers %d g.",
+                 RENT_AMOUNT, G.bank, G.money);
+        begin_event(EVENT_RENT, "Rent Collected", detail);
+        G.event.money_delta = -RENT_AMOUNT;
+        G.event.success = true;
+        play_sound(SFX_CONFIRM);
+    } else {
+        snprintf(detail, sizeof(detail),
+                 "Rent of %d g came due and the coffers ran dry. %s and you are "
+                 "put out of the ranch - the run ends here.",
+                 RENT_AMOUNT, G.kilix.name);
+        begin_event(EVENT_EVICTION, "Eviction Notice", detail);
+        play_sound(SFX_LOSE);
+    }
+    return true;
+}
+
 static void dismiss_event(void)
 {
     EventState old_event;
@@ -1398,6 +1613,14 @@ static void dismiss_event(void)
     if (G.screen_time < 0.12f)
         return;
     old_event = G.event;
+    if (old_event.kind == EVENT_EVICTION) {
+        /* The run is over: wipe the ranch record and return to the title. */
+        game_delete_save();
+        G.save_exists = false;
+        memset(&G.event, 0, sizeof(G.event));
+        change_screen(SCREEN_TITLE);
+        return;
+    }
     if (old_event.kind == EVENT_BATTLE_RESULT && old_event.success
         && old_event.index == RANK_COUNT - 1) {
         change_screen(SCREEN_CHAMPION);
@@ -1413,6 +1636,10 @@ static void dismiss_event(void)
         play_sound(SFX_WIN);
         return;
     }
+    /* A concluded week may have crossed into a new month: collect the rent (or
+     * evict) before handing control back to the ranch. */
+    if (present_rent_event())
+        return;
     game_go_ranch();
 }
 
@@ -1510,28 +1737,46 @@ static void handle_naming_key(int key)
     }
 }
 
+/* Ranch menu rows, in display order. Kept in one place so the handler, the
+ * activator and the renderer agree. */
+enum {
+    RANCH_DRILLS, RANCH_ACADEMY, RANCH_DOJO, RANCH_BANK, RANCH_CATNAP,
+    RANCH_CARE, RANCH_ARENA, RANCH_JOURNAL, RANCH_SAVE, RANCH_ROWS
+};
+
 static void activate_ranch_row(int row)
 {
     switch (row) {
-    case 0:
+    case RANCH_DRILLS:
         G.drill_cursor = 0;
         change_screen(SCREEN_TRAINING);
         break;
-    case 1:
+    case RANCH_ACADEMY:
+        G.academy_phase = 0;
+        change_screen(SCREEN_ACADEMY);
+        break;
+    case RANCH_DOJO:
+        G.dojo_cursor = 1;          /* open on the first purchasable move */
+        change_screen(SCREEN_DOJO);
+        break;
+    case RANCH_BANK:
+        change_screen(SCREEN_BANK);
+        break;
+    case RANCH_CATNAP:
         perform_rest();
         break;
-    case 2:
+    case RANCH_CARE:
         G.care_cursor = 0;
         change_screen(SCREEN_CARE);
         break;
-    case 3:
+    case RANCH_ARENA:
         G.arena_cursor = G.kilix.rank;
         change_screen(SCREEN_ARENA);
         break;
-    case 4:
+    case RANCH_JOURNAL:
         open_journal();
         break;
-    case 5:
+    case RANCH_SAVE:
         if (game_save())
             game_show_toast("Ranch record saved.");
         else
@@ -1551,29 +1796,35 @@ static void handle_ranch_key(int key)
         return;
     }
     if (key == KEY_UP || lower == 'w') {
-        G.cursor = wrap_index(G.cursor - 1, 6);
+        G.cursor = wrap_index(G.cursor - 1, RANCH_ROWS);
         G.first_visit = false;
         play_sound(SFX_MOVE);
         return;
     }
     if (key == KEY_DOWN || lower == 's') {
-        G.cursor = wrap_index(G.cursor + 1, 6);
+        G.cursor = wrap_index(G.cursor + 1, RANCH_ROWS);
         G.first_visit = false;
         play_sound(SFX_MOVE);
         return;
     }
     if (lower == 'd')
-        G.cursor = 0;
+        G.cursor = RANCH_DRILLS;
+    else if (lower == 't')
+        G.cursor = RANCH_ACADEMY;
+    else if (lower == 'o')          /* 'm' is the global mute toggle */
+        G.cursor = RANCH_DOJO;
+    else if (lower == 'b')
+        G.cursor = RANCH_BANK;
     else if (lower == 'r')
-        G.cursor = 1;
+        G.cursor = RANCH_CATNAP;
     else if (lower == 'c')
-        G.cursor = 2;
+        G.cursor = RANCH_CARE;
     else if (lower == 'a')
-        G.cursor = 3;
+        G.cursor = RANCH_ARENA;
     else if (lower == 'j')
-        G.cursor = 4;
+        G.cursor = RANCH_JOURNAL;
     else if (lower == 'v')
-        G.cursor = 5;
+        G.cursor = RANCH_SAVE;
     else if (!is_confirm_key(key))
         return;
 
@@ -1621,6 +1872,71 @@ static void handle_care_key(int key)
         play_sound(SFX_MOVE);
     } else if (is_confirm_key(key)) {
         use_care_item(G.care_cursor);
+    }
+}
+
+static void handle_academy_key(int key)
+{
+    int lower = lower_key(key);
+
+    if (G.academy_phase != 0)          /* the montage plays out on its own */
+        return;
+    if (key == KEY_ESC) {
+        game_go_ranch();
+        return;
+    }
+    if (key == KEY_UP || lower == 'w') {
+        G.academy_cursor = wrap_index(G.academy_cursor - 1, STAT_COUNT);
+        G.cursor = G.academy_cursor;
+        play_sound(SFX_MOVE);
+    } else if (key == KEY_DOWN || lower == 's') {
+        G.academy_cursor = wrap_index(G.academy_cursor + 1, STAT_COUNT);
+        G.cursor = G.academy_cursor;
+        play_sound(SFX_MOVE);
+    } else if (is_confirm_key(key)) {
+        academy_begin(G.academy_cursor);
+    }
+}
+
+static void handle_dojo_key(int key)
+{
+    int lower = lower_key(key);
+
+    if (key == KEY_ESC) {
+        game_go_ranch();
+        return;
+    }
+    if (key == KEY_UP || lower == 'w') {
+        G.dojo_cursor = wrap_index(G.dojo_cursor - 1, MOVE_COUNT);
+        G.cursor = G.dojo_cursor;
+        play_sound(SFX_MOVE);
+    } else if (key == KEY_DOWN || lower == 's') {
+        G.dojo_cursor = wrap_index(G.dojo_cursor + 1, MOVE_COUNT);
+        G.cursor = G.dojo_cursor;
+        play_sound(SFX_MOVE);
+    } else if (is_confirm_key(key)) {
+        learn_move(G.dojo_cursor);
+    }
+}
+
+static void handle_bank_key(int key)
+{
+    int lower = lower_key(key);
+
+    if (key == KEY_ESC) {
+        game_go_ranch();
+        return;
+    }
+    if (key == KEY_UP || lower == 'w') {
+        G.bank_cursor = wrap_index(G.bank_cursor - 1, BANK_ACTIONS);
+        G.cursor = G.bank_cursor;
+        play_sound(SFX_MOVE);
+    } else if (key == KEY_DOWN || lower == 's') {
+        G.bank_cursor = wrap_index(G.bank_cursor + 1, BANK_ACTIONS);
+        G.cursor = G.bank_cursor;
+        play_sound(SFX_MOVE);
+    } else if (is_confirm_key(key)) {
+        bank_action(G.bank_cursor);
     }
 }
 
@@ -1785,6 +2101,15 @@ void game_handle_key(int key)
     case SCREEN_DRILL:
         minigame_key(key);
         break;
+    case SCREEN_ACADEMY:
+        handle_academy_key(key);
+        break;
+    case SCREEN_DOJO:
+        handle_dojo_key(key);
+        break;
+    case SCREEN_BANK:
+        handle_bank_key(key);
+        break;
     case SCREEN_EVENT:
         if (is_confirm_key(key) || key == KEY_ESC)
             dismiss_event();
@@ -1825,6 +2150,11 @@ static void tick_step(float dt)
         battle_tick(dt);
     else if (G.screen == SCREEN_DRILL)
         minigame_tick(dt);
+    else if (G.screen == SCREEN_ACADEMY && G.academy_phase == 1) {
+        G.academy_clock += dt;
+        if (G.academy_clock >= ACADEMY_ANIM)
+            academy_finish();          /* montage done: apply the gain */
+    }
 }
 
 void game_tick(float dt)
@@ -1880,6 +2210,11 @@ static void fill_save_data(SaveData *save)
     save->total_losses = G.kilix.total_losses;
     save->personality_seed = G.kilix.personality_seed;
     save->sound_on = G.sound_on ? 1u : 0u;
+    /* v3 economy state rides in the previously reserved slots. */
+    save->reserved[0] = (uint32_t)G.kilix.hunger;
+    save->reserved[1] = G.moves_known;
+    save->reserved[2] = (uint32_t)G.rent_paid_weeks;
+    save->reserved[3] = (uint32_t)G.bank;
     save->checksum = 0;
     save->checksum = hash_bytes(save, sizeof(*save));
 }
@@ -1900,6 +2235,16 @@ static bool valid_save_data(const SaveData *save)
     if (save->rng == 0 || save->total_weeks < 0
         || save->total_weeks > SAVE_WEEKS_MAX
         || save->money < 0 || save->money > SAVE_MONEY_MAX)
+        return false;
+    /* v3 economy fields: hunger in range, at least the basic move known and no
+     * unknown move bits, rent covering a sane, non-negative span. */
+    if (save->reserved[0] > 100
+        || (save->reserved[1] & 1u) == 0
+        || save->reserved[1] >= (1u << MOVE_COUNT)
+        || (int32_t)save->reserved[2] < 0
+        || (int32_t)save->reserved[2] > SAVE_WEEKS_MAX + MONTH_WEEKS
+        || (int32_t)save->reserved[3] < 0
+        || (int32_t)save->reserved[3] > SAVE_MONEY_MAX)
         return false;
     /* Canonical name: a non-empty run of printable ASCII, then all-zero to the
      * end of the field. The keyboard path (clean_name) already produces this;
@@ -2046,6 +2391,10 @@ bool game_load(void)
     loaded.kilix.total_losses = save.total_losses;
     loaded.kilix.personality_seed = save.personality_seed;
     loaded.sound_on = save.sound_on != 0;
+    loaded.kilix.hunger = (int)save.reserved[0];
+    loaded.moves_known = save.reserved[1] | 1u;   /* basic move always known */
+    loaded.rent_paid_weeks = (int)save.reserved[2];
+    loaded.bank = (int)save.reserved[3];
     loaded.save_exists = true;
     loaded.first_visit = false;
     loaded.battle.opponent = -1;
@@ -2070,7 +2419,7 @@ static bool state_invariants(void)
 {
     int i;
 
-    if (G.screen < SCREEN_TITLE || G.screen > SCREEN_CHAMPION
+    if (G.screen < SCREEN_TITLE || G.screen > SCREEN_BANK
         || G.rng == 0 || G.total_weeks < 0 || G.total_weeks > SAVE_WEEKS_MAX
         || G.money < 0 || G.money > SAVE_MONEY_MAX
         || G.kilix.age_weeks != G.total_weeks
@@ -2293,7 +2642,7 @@ int game_selftest(unsigned seed, int weeks)
     game_handle_key(KEY_ENTER);
     SELFTEST_CHECK(G.screen == SCREEN_RANCH && strcmp(G.kilix.name, "Ash") == 0,
                    "naming did not create the requested Kilix");
-    G.cursor = 1;
+    G.cursor = RANCH_CATNAP;
     before = G.total_weeks;
     game_handle_key(KEY_ENTER);
     SELFTEST_CHECK(G.screen == SCREEN_EVENT && G.total_weeks == before + 1,
@@ -2305,7 +2654,7 @@ int game_selftest(unsigned seed, int weeks)
     game_handle_key(KEY_ENTER);
     SELFTEST_CHECK(G.screen == SCREEN_RANCH && G.total_weeks == before + 1,
                    "event did not return to ranch cleanly");
-    G.cursor = 2;
+    G.cursor = RANCH_CARE;
     game_handle_key(KEY_ENTER);
     G.money = 0;
     before = G.total_weeks;
@@ -2313,7 +2662,7 @@ int game_selftest(unsigned seed, int weeks)
     SELFTEST_CHECK(G.screen == SCREEN_CARE && G.total_weeks == before,
                    "unaffordable care item consumed a week");
     game_handle_key(KEY_ESC);
-    G.cursor = 3;
+    G.cursor = RANCH_ARENA;
     game_handle_key(KEY_ENTER);
     G.arena_cursor = 1;
     before = G.total_weeks;
@@ -2441,6 +2790,7 @@ int game_selftest(unsigned seed, int weeks)
             G.kilix.stats.value[i] = 400;
         G.kilix.rank = 0;
         G.kilix.fatigue = G.kilix.stress = 0;
+        G.moves_known = (1u << MOVE_COUNT) - 1;   /* full moveset for auto-battle */
         G.screen = SCREEN_ARENA;
         G.arena_cursor = 0;
         game_start_battle(0);
@@ -2467,6 +2817,98 @@ int game_selftest(unsigned seed, int weeks)
                        "skilled drill play must clearly beat sloppy play");
         SELFTEST_CHECK(skilled >= 0.5f,
                        "a well-played drill should score at least half");
+    }
+
+    /* ---- economy: rent, hunger, and move-learning ---------------------- */
+    {
+        int before_life, before_hunger, before_weeks;
+
+        /* Rent: not due before the paid-through week; charged up front once the
+         * month elapses; and eviction when bank + coffers can't cover it. */
+        G.bank = 0;
+        G.total_weeks = 3; G.rent_paid_weeks = 4; G.money = 1500;
+        SELFTEST_CHECK(try_collect_rent() == RENT_NOT_DUE && G.money == 1500,
+                       "rent charged before the paid-through week");
+        G.total_weeks = 4;
+        SELFTEST_CHECK(try_collect_rent() == RENT_PAID && G.money == 500
+                       && G.rent_paid_weeks == 8,
+                       "rent must be collected up front for the month");
+        SELFTEST_CHECK(try_collect_rent() == RENT_NOT_DUE,
+                       "rent must not double-charge within one month");
+        G.total_weeks = 8; G.money = 200;
+        SELFTEST_CHECK(try_collect_rent() == RENT_EVICTED
+                       && G.rent_paid_weeks == 8 && G.money == 200,
+                       "an unpayable rent must evict without touching the ledger");
+
+        /* Bank: transfers move gold between coffers and vault, capped at what is
+         * held; rent then draws from the vault first, then the coffers. */
+        G.money = 1000; G.bank = 0;
+        bank_move(600);
+        SELFTEST_CHECK(G.bank == 600 && G.money == 400,
+                       "a deposit must move gold into the vault");
+        bank_move(-250);
+        SELFTEST_CHECK(G.bank == 350 && G.money == 650,
+                       "a withdrawal must return gold to the coffers");
+        bank_move(9999);
+        SELFTEST_CHECK(G.bank == 1000 && G.money == 0,
+                       "a deposit must cap at the coffers on hand");
+        G.bank = 700; G.money = 500; G.total_weeks = 20; G.rent_paid_weeks = 20;
+        SELFTEST_CHECK(try_collect_rent() == RENT_PAID && G.bank == 0 && G.money == 200,
+                       "rent must drain the vault first, then the coffers");
+        G.bank = 1500; G.money = 50; G.total_weeks = 24; G.rent_paid_weeks = 24;
+        SELFTEST_CHECK(try_collect_rent() == RENT_PAID && G.bank == 500 && G.money == 50,
+                       "a full vault must pay rent without touching the coffers");
+        /* A transfer at the money cap must conserve gold, not clamp it away. */
+        G.money = SAVE_MONEY_MAX; G.bank = 500;
+        {
+            long total_before = (long)G.money + (long)G.bank;
+            bank_move(G.money);                 /* deposit all: capped to vault room */
+            SELFTEST_CHECK((long)G.money + (long)G.bank == total_before
+                           && G.bank <= SAVE_MONEY_MAX,
+                           "a capped transfer must not create or destroy gold");
+        }
+
+        /* Hunger: a week climbs it and starvation decays stats; food lowers it. */
+        G.kilix.hunger = 82;
+        G.kilix.stats.value[STAT_LIFE] = 60;
+        before_life = G.kilix.stats.value[STAT_LIFE];
+        before_hunger = G.kilix.hunger;
+        game_advance_week();                         /* 82 -> 96: starving */
+        SELFTEST_CHECK(G.kilix.hunger > before_hunger,
+                       "hunger must climb every week");
+        SELFTEST_CHECK(G.kilix.stats.value[STAT_LIFE] < before_life,
+                       "a starving Kilix must lose stats");
+        G.money = 2000; G.kilix.hunger = 90;
+        before_hunger = G.kilix.hunger;
+        use_care_item(0);                            /* Hearth Stew: high satiety */
+        SELFTEST_CHECK(G.kilix.hunger < before_hunger,
+                       "food must reduce hunger");
+
+        /* Dojo: an advanced move is locked until bought; buying deducts gold and
+         * sets exactly its bit with no week spent. */
+        G.moves_known = 1u; G.money = 2000;
+        before_weeks = G.total_weeks;
+        learn_move(1);
+        SELFTEST_CHECK((G.moves_known & 2u) && G.money == 2000 - MOVES[1].price
+                       && G.total_weeks == before_weeks,
+                       "learning a move must cost gold, spend no week, set its bit");
+        G.money = 0;
+        learn_move(2);
+        SELFTEST_CHECK(!(G.moves_known & 4u),
+                       "an unaffordable move must not be learned");
+
+        /* A forfeited match spends a week, so at an unpayable rent boundary it
+         * must still evict rather than let the player dodge rent by forfeiting. */
+        G.moves_known = (1u << MOVE_COUNT) - 1;
+        G.kilix.rank = 0;
+        G.screen = SCREEN_ARENA;
+        G.arena_cursor = 0;
+        game_start_battle(0);
+        G.battle.phase = BATTLE_ACTIVE;
+        G.total_weeks = 12; G.rent_paid_weeks = 12; G.money = 0; G.bank = 0;
+        game_handle_key(KEY_ESC);                    /* mid-fight Esc = forfeit */
+        SELFTEST_CHECK(G.screen == SCREEN_EVENT && G.event.kind == EVENT_EVICTION,
+                       "forfeiting at an unpayable rent boundary must still evict");
     }
 
     suppress_autosave = old_suppression;

@@ -57,7 +57,7 @@ test: $(BIN) validate-assets
 	trap 'rm -rf "$$render_dir"' EXIT HUP INT TERM; \
 	./$(BIN) --render-test "$$render_dir" 1337; \
 	set -- "$$render_dir"/render_*.ppm; \
-	test "$$#" -eq 24; \
+	test "$$#" -eq 30; \
 	for image do test -s "$$image"; done
 
 audio:
@@ -68,7 +68,7 @@ install: $(BIN) validate-assets
 	install -d -m755 "$(ASSET_DEST)" "$(ASSET_DEST)/backgrounds" \
 		"$(ASSET_DEST)/opponents" "$(ASSET_DEST)/care" \
 		"$(ASSET_DEST)/icons" "$(ASSET_DEST)/minigame" "$(ASSET_DEST)/sfx"
-	install -m644 assets/kilix.ppm assets/kilix_atlas.ppm assets/journal.ppm assets/font.ppm \
+	install -m644 assets/kilix.ppm assets/kilix_atlas.ppm assets/journal.ppm assets/font.ppm assets/rent.ppm \
 		"$(ASSET_DEST)/"
 	install -m644 assets/backgrounds/*.ppm "$(ASSET_DEST)/backgrounds/"
 	install -m644 assets/opponents/*.ppm "$(ASSET_DEST)/opponents/"

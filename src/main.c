@@ -314,13 +314,57 @@ static int render_test(const char *directory, unsigned seed)
         failures += !dump_named(directory, info[i].file);
     }
 
+    /* Economy screens: Academy (menu + montage), Dojo, and the rent events. */
+    G.money = 1500;
+    G.screen = SCREEN_ACADEMY;
+    G.academy_phase = 0;
+    G.academy_cursor = 1;
+    failures += !dump_named(directory, "render_25_academy.ppm");
+    G.academy_phase = 1;
+    G.academy_choice = 1;
+    G.academy_clock = 0.9f;
+    failures += !dump_named(directory, "render_26_academy_train.ppm");
+
+    G.screen = SCREEN_DOJO;
+    G.dojo_cursor = 2;
+    G.moves_known = 0x3u;                     /* first extra move already learned */
+    failures += !dump_named(directory, "render_27_dojo.ppm");
+
+    G.screen = SCREEN_EVENT;
+    G.event.kind = EVENT_RENT;
+    G.event.success = true;
+    G.event.money_delta = -RENT_AMOUNT;
+    G.event.duration = 2.2f;
+    G.event.timer = 2.2f;
+    snprintf(G.event.title, sizeof G.event.title, "%s", "Rent Collected");
+    snprintf(G.event.detail, sizeof G.event.detail, "%s",
+             "The ranch collector calls. Rent of 1000 g is paid up front for "
+             "the coming month.");
+    failures += !dump_named(directory, "render_28_rent.ppm");
+
+    G.event.kind = EVENT_EVICTION;
+    G.event.success = false;
+    G.event.money_delta = 0;
+    snprintf(G.event.title, sizeof G.event.title, "%s", "Eviction Notice");
+    snprintf(G.event.detail, sizeof G.event.detail, "%s",
+             "Rent came due and the coffers ran dry. The run ends here.");
+    failures += !dump_named(directory, "render_29_eviction.ppm");
+
+    G.screen = SCREEN_BANK;
+    G.money = 650;
+    G.bank = 800;
+    G.rent_paid_weeks = 6;
+    G.total_weeks = 4;                        /* rent due in 2 weeks */
+    G.bank_cursor = 1;
+    failures += !dump_named(directory, "render_30_bank.ppm");
+
     render_shutdown();
     unlink(temporary_save);
     if (failures) {
         fprintf(stderr, "render-test: %d snapshot(s) failed\n", failures);
         return 1;
     }
-    printf("PASS: wrote 24 visual snapshots to %s\n", directory);
+    printf("PASS: wrote 30 visual snapshots to %s\n", directory);
     return 0;
 }
 
