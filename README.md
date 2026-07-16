@@ -42,8 +42,12 @@ make
 ./kilix-rancher
 ```
 
-Audio is optional. The game uses the first available player among `pw-play`,
-`paplay`, `aplay`, and SoX `play`; it remains fully playable without one.
+Audio is optional. The shared mixer probes `pacat`, `pw-play`, `aplay`, and
+SoX `play`; the game remains fully playable without one.
+
+Keyboard input, Kitty presentation, and audio mixing use vendored
+`kitty_keyboard`, `kitty-framebuffer`, and `pcm-mixer` sources under
+`third_party/`; the illustrated ranch renderer remains game-specific.
 
 ## Controls
 

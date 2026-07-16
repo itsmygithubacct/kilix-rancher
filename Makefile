@@ -1,5 +1,9 @@
 CC ?= cc
-CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L
+KITTY_FRAMEBUFFER_DIR ?= third_party/kitty-framebuffer
+PCM_MIXER_DIR ?= third_party/pcm-mixer
+CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L \
+	-I$(KITTY_FRAMEBUFFER_DIR)/include \
+	-I$(PCM_MIXER_DIR)/include
 CFLAGS ?= -O2 -Wall -Wextra -Wpedantic -std=c11
 LDFLAGS ?=
 LDLIBS += -lz -lm
@@ -9,7 +13,9 @@ LDLIBS += -lz -lm
 
 BIN = kilix-rancher
 SRC = src/main.c src/game.c src/render.c src/term.c src/sound.c
-OBJ = $(SRC:.c=.o)
+VENDOR_OBJ = src/vendor_kitty_framebuffer.o src/vendor_pcm_mixer.o \
+	src/vendor_pcm_wav.o
+OBJ = $(SRC:.c=.o) $(VENDOR_OBJ)
 DEP = $(OBJ:.o=.d)
 
 PREFIX ?= /usr/local
@@ -34,6 +40,22 @@ $(BIN): $(OBJ)
 # -MMD -MP records each object's real header dependencies (in $(DEP)); the
 # explicit kilix.h prerequisite covers the very first, pre-.d build.
 src/%.o: src/%.c src/kilix.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
+
+src/sound.o: $(PCM_MIXER_DIR)/include/pcm_mixer.h
+src/term.o: $(KITTY_FRAMEBUFFER_DIR)/include/kitty_framebuffer.h
+
+src/vendor_kitty_framebuffer.o: $(KITTY_FRAMEBUFFER_DIR)/src/kitty_framebuffer.c \
+	$(KITTY_FRAMEBUFFER_DIR)/src/kitty_framebuffer_internal.h \
+	$(KITTY_FRAMEBUFFER_DIR)/include/kitty_framebuffer.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
+
+src/vendor_pcm_mixer.o: $(PCM_MIXER_DIR)/src/pcm_mixer.c \
+	$(PCM_MIXER_DIR)/include/pcm_mixer.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
+
+src/vendor_pcm_wav.o: $(PCM_MIXER_DIR)/src/pcm_wav.c \
+	$(PCM_MIXER_DIR)/include/pcm_mixer.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
 
 -include $(DEP)
