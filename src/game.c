@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "kilix.h"
+#include "kilix_state.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -180,15 +181,35 @@ static void play_sound(SoundId sound)
 
 static bool file_exists(const char *path)
 {
-    FILE *file;
+    kilixstate_options options;
+    kilixstate_store store;
+    size_t required = 0u;
+    kilixstate_result result;
 
     if (!path || !path[0])
         return false;
-    file = fopen(path, "rb");
-    if (!file)
+    kilixstate_options_init(&options);
+    options.absolute_path = path;
+    options.max_payload = sizeof(SAVE_MAGIC) + sizeof(SaveData);
+    options.format = KILIXSTATE_FORMAT_RAW;
+    if (kilixstate_store_init(&store, &options) != KILIXSTATE_OK)
         return false;
-    fclose(file);
-    return true;
+    result = kilixstate_load(&store, NULL, 0u, &required);
+    kilixstate_store_close(&store);
+    return result != KILIXSTATE_NOT_FOUND;
+}
+
+static bool save_store_init(kilixstate_store *store)
+{
+    kilixstate_options options;
+
+    if (!G.save_path[0]) return false;
+    kilixstate_options_init(&options);
+    options.absolute_path = G.save_path;
+    options.max_payload = sizeof(SAVE_MAGIC) + sizeof(SaveData);
+    /* Preserve the KILIXSV2 + SaveData format for existing ranches. */
+    options.format = KILIXSTATE_FORMAT_RAW;
+    return kilixstate_store_init(store, &options) == KILIXSTATE_OK;
 }
 
 static void choose_save_path(char *out, size_t out_size)
@@ -2287,51 +2308,22 @@ static bool valid_save_data(const SaveData *save)
 bool game_save(void)
 {
     SaveData save;
-    FILE *file;
-    char temporary[sizeof(G.save_path) + 8];
-    bool ok = false;
-    int written;
+    unsigned char payload[sizeof(SAVE_MAGIC) + sizeof save];
+    kilixstate_store store;
+    bool ok;
 
     if (!G.save_path[0] || !G.kilix.name[0])
         return false;
     normalize_game();
     fill_save_data(&save);
-    written = snprintf(temporary, sizeof(temporary), "%s.tmp", G.save_path);
-    if (written < 0 || (size_t)written >= sizeof(temporary))
+    memcpy(payload, SAVE_MAGIC, sizeof SAVE_MAGIC);
+    memcpy(payload + sizeof SAVE_MAGIC, &save, sizeof save);
+    if (!save_store_init(&store)) {
+        G.save_failed = true;
         return false;
-
-    /* Create the temp file freshly, never following a symlink: an attacker
-     * who pre-plants <save>.tmp as a symlink cannot redirect the write, and
-     * O_EXCL makes a race lose safely (save fails) rather than clobber a
-     * victim file. */
-    remove(temporary);
-    {
-        int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-        if (fd < 0) {
-            G.save_failed = true;
-            return false;
-        }
-        file = fdopen(fd, "wb");
-        if (!file) {
-            close(fd);
-            remove(temporary);
-            G.save_failed = true;
-            return false;
-        }
     }
-    if (fwrite(SAVE_MAGIC, 1, sizeof(SAVE_MAGIC), file) == sizeof(SAVE_MAGIC)
-        && fwrite(&save, 1, sizeof(save), file) == sizeof(save)
-        && fflush(file) == 0) {
-        int descriptor = fileno(file);
-        if (descriptor < 0 || fsync(descriptor) == 0)
-            ok = true;
-    }
-    if (fclose(file) != 0)
-        ok = false;
-    if (ok && rename(temporary, G.save_path) != 0)
-        ok = false;
-    if (!ok)
-        remove(temporary);
+    ok = kilixstate_save(&store, payload, sizeof payload) == KILIXSTATE_OK;
+    kilixstate_store_close(&store);
     /* Track save health in a field the screen-change toast-clear cannot wipe,
      * so a persistent on-screen warning can surface a failing disk. */
     G.save_failed = !ok;
@@ -2345,26 +2337,25 @@ bool game_save(void)
 bool game_load(void)
 {
     SaveData save;
-    unsigned char magic[sizeof(SAVE_MAGIC)];
-    FILE *file;
-    int trailing;
+    unsigned char payload[sizeof(SAVE_MAGIC) + sizeof save];
+    kilixstate_store store;
+    size_t payload_size = 0u;
     int i;
     GameState loaded;
 
     if (!G.save_path[0])
         return false;
-    file = fopen(G.save_path, "rb");
-    if (!file)
+    if (!save_store_init(&store))
         return false;
-    if (fread(magic, 1, sizeof(magic), file) != sizeof(magic)
-        || fread(&save, 1, sizeof(save), file) != sizeof(save)) {
-        fclose(file);
+    if (kilixstate_load(&store, payload, sizeof payload, &payload_size) !=
+        KILIXSTATE_OK || payload_size != sizeof payload) {
+        kilixstate_store_close(&store);
         return false;
     }
-    trailing = fgetc(file);
-    if (fclose(file) != 0 || trailing != EOF
-        || memcmp(magic, SAVE_MAGIC, sizeof(magic)) != 0
-        || !valid_save_data(&save))
+    kilixstate_store_close(&store);
+    memcpy(&save, payload + sizeof SAVE_MAGIC, sizeof save);
+    if (memcmp(payload, SAVE_MAGIC, sizeof SAVE_MAGIC) != 0 ||
+        !valid_save_data(&save))
         return false;
 
     memset(&loaded, 0, sizeof(loaded));
@@ -2407,9 +2398,15 @@ bool game_load(void)
 
 bool game_delete_save(void)
 {
+    kilixstate_store store;
+    kilixstate_result result;
+
     if (!G.save_path[0])
         return false;
-    if (remove(G.save_path) != 0 && errno != ENOENT)
+    if (!save_store_init(&store)) return false;
+    result = kilixstate_remove(&store);
+    kilixstate_store_close(&store);
+    if (result != KILIXSTATE_OK && result != KILIXSTATE_NOT_FOUND)
         return false;
     G.save_exists = false;
     return true;
@@ -2762,10 +2759,10 @@ int game_selftest(unsigned seed, int weeks)
         char good_path[512];
         char bad_path[512];
         copy_text(good_path, sizeof(good_path), G.save_path);
-        snprintf(bad_path, sizeof(bad_path), "%s/missing-subdir/ranch.save",
+        snprintf(bad_path, sizeof(bad_path), "%s/../escape/ranch.save",
                  test_dir);
         copy_text(G.save_path, sizeof(G.save_path), bad_path);
-        SELFTEST_CHECK(!game_save(), "save into a missing directory must fail");
+        SELFTEST_CHECK(!game_save(), "save through an unsafe path must fail");
         SELFTEST_CHECK(G.save_failed,
                        "a failed save must raise the sticky warning flag");
         copy_text(G.save_path, sizeof(G.save_path), good_path);

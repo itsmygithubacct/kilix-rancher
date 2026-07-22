@@ -1,16 +1,9 @@
 #include "kilix.h"
-#include "pcm_mixer.h"
+#include "pcmmix_bank.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define MAX_SFX_VARIANTS 6
-
-typedef struct {
-    int16_t *data;
-    size_t frames;
-} Sample;
 
 static const char *const SFX_FILES[SFX_COUNT] = {
     [SFX_MOVE] = "sfx/move.wav",
@@ -30,30 +23,9 @@ static const uint8_t SFX_VARIANTS[SFX_COUNT] = {
     [SFX_LOSE] = 3,
 };
 
-static Sample samples[SFX_COUNT][MAX_SFX_VARIANTS];
-static uint8_t last_variants[SFX_COUNT];
-static uint32_t sound_rng = 0x4b17c4e5u;
+static pcmmix_bank sound_bank;
 static pcmmix mixer;
 static bool mixer_started;
-
-static uint32_t sound_random_u32(void)
-{
-    sound_rng ^= sound_rng << 13;
-    sound_rng ^= sound_rng >> 17;
-    sound_rng ^= sound_rng << 5;
-    return sound_rng;
-}
-
-static unsigned choose_variant(SoundId id)
-{
-    unsigned count = SFX_VARIANTS[id];
-    if (count <= 1) return 0;
-    unsigned variant;
-    do variant = sound_random_u32() % count;
-    while (variant == last_variants[id]);
-    last_variants[id] = (uint8_t)variant;
-    return variant;
-}
 
 static bool variant_filename(const char *base, unsigned variant,
                              char *out, size_t size)
@@ -65,21 +37,12 @@ static bool variant_filename(const char *base, unsigned variant,
                     variant + 1, extension) < (int)size;
 }
 
-static void free_samples(void)
-{
-    for (int id = 0; id < SFX_COUNT; id++)
-        for (int variant = 0; variant < MAX_SFX_VARIANTS; variant++) {
-            pcmmix_wav_free(samples[id][variant].data);
-            samples[id][variant] = (Sample){0};
-        }
-}
-
 bool sound_init(void)
 {
     pcmmix_options options;
     char relative[96], error[256];
 
-    memset(last_variants, 0xff, sizeof last_variants);
+    (void)pcmmix_bank_init(&sound_bank, SFX_COUNT, 0x4b17c4e5u);
     if (G.headless) return false;
     for (int id = 0; id < SFX_COUNT; id++) {
         for (unsigned variant = 0; variant < SFX_VARIANTS[id]; variant++) {
@@ -87,13 +50,14 @@ bool sound_init(void)
                                   sizeof relative))
                 continue;
             const char *path = asset_path(relative);
-            samples[id][variant].data = pcmmix_wav_load(
-                path, &samples[id][variant].frames, error, sizeof error);
+            (void)pcmmix_bank_load_wav(&sound_bank, (uint32_t)id, variant,
+                                       path, 1.0f, 1.0f,
+                                       error, sizeof error);
         }
     }
     pcmmix_options_init(&options);
     if (!pcmmix_start(&mixer, &options)) {
-        free_samples();
+        pcmmix_bank_clear(&sound_bank);
         return false;
     }
     mixer_started = true;
@@ -105,15 +69,13 @@ void sound_play(SoundId id)
     if (!mixer_started || G.headless || !G.sound_on ||
         (int)id < 0 || id >= SFX_COUNT)
         return;
-    Sample *sample = &samples[id][choose_variant(id)];
-    if (!sample->data) return;
-    pcmmix_sample clip = {sample->data, sample->frames};
-    (void)pcmmix_play(&mixer, &clip, 1.0f, 1.0f);
+    (void)pcmmix_bank_play(&mixer, &sound_bank, (uint32_t)id,
+                           1.0f, 1.0f);
 }
 
 void sound_shutdown(void)
 {
     if (mixer_started) pcmmix_stop(&mixer);
     mixer_started = false;
-    free_samples();
+    pcmmix_bank_clear(&sound_bank);
 }

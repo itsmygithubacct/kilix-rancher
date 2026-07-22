@@ -1,26 +1,18 @@
 CC ?= cc
-KITTY_KEYBOARD_DIR ?= third_party/kitty_keyboard
-KITTY_FRAMEBUFFER_DIR ?= third_party/kitty-framebuffer
-SOFT_RASTER_DIR ?= third_party/soft-raster
-PCM_MIXER_DIR ?= third_party/pcm-mixer
+KILIX_GAME_KIT_DIR ?= third_party/kilix-game-kit
+include $(KILIX_GAME_KIT_DIR)/mk/game-kit.mk
 CPPFLAGS += -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L \
-	-I$(KITTY_KEYBOARD_DIR)/include \
-	-I$(KITTY_FRAMEBUFFER_DIR)/include \
-	-I$(SOFT_RASTER_DIR)/include \
-	-I$(PCM_MIXER_DIR)/include
+	$(KILIX_GAME_KIT_CPPFLAGS)
 CFLAGS ?= -O2 -Wall -Wextra -Wpedantic -std=c11
 LDFLAGS ?=
-LDLIBS += -lz -lm
+LDLIBS += $(KILIX_GAME_KIT_LDLIBS)
 # -pthread must reach BOTH the compile and link steps. It is placed directly on
 # the recipes (not tucked into CFLAGS/LDLIBS) so it survives a command-line
 # `make CFLAGS=...` override, which would otherwise replace CFLAGS wholesale.
 
 BIN = kilix-rancher
 SRC = src/main.c src/game.c src/render.c src/term.c src/sound.c
-VENDOR_OBJ = src/vendor_kitty_keyboard.o src/vendor_kitty_keyboard_posix.o \
-	src/vendor_kitty_framebuffer.o src/vendor_soft_raster.o \
-	src/vendor_pcm_mixer.o src/vendor_pcm_wav.o
-OBJ = $(SRC:.c=.o) $(VENDOR_OBJ)
+OBJ = $(SRC:.c=.o)
 DEP = $(OBJ:.o=.d)
 
 PREFIX ?= /usr/local
@@ -39,46 +31,21 @@ all: $(BIN)
 
 # $(CFLAGS) is repeated on the link line so a sanitizer/coverage build
 # (make CFLAGS="-fsanitize=address ...") links its runtime correctly.
-$(BIN): $(OBJ)
-	$(CC) $(CFLAGS) $(LDFLAGS) -pthread -o $@ $(OBJ) $(LDLIBS)
+$(BIN): $(OBJ) $(KILIX_GAME_KIT_LIB)
+	$(CC) $(CFLAGS) $(LDFLAGS) -pthread -o $@ $(OBJ) \
+		$(KILIX_GAME_KIT_LIB) $(LDLIBS)
 
 # -MMD -MP records each object's real header dependencies (in $(DEP)); the
 # explicit kilix.h prerequisite covers the very first, pre-.d build.
 src/%.o: src/%.c src/kilix.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
 
-src/sound.o: $(PCM_MIXER_DIR)/include/pcm_mixer.h
+src/sound.o: $(PCM_MIXER_DIR)/include/pcmmix_bank.h
+src/game.o: $(KILIX_STATE_DIR)/include/kilix_state.h
 src/render.o: $(SOFT_RASTER_DIR)/include/soft_raster.h
 src/term.o: $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h \
 	$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_posix.h \
 	$(KITTY_FRAMEBUFFER_DIR)/include/kitty_framebuffer.h
-
-src/vendor_kitty_keyboard.o: $(KITTY_KEYBOARD_DIR)/src/kitty_keyboard.c \
-	$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
-
-src/vendor_kitty_keyboard_posix.o: $(KITTY_KEYBOARD_DIR)/src/kitty_keyboard_posix.c \
-	$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h \
-	$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_posix.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
-
-src/vendor_kitty_framebuffer.o: $(KITTY_FRAMEBUFFER_DIR)/src/kitty_framebuffer.c \
-	$(KITTY_FRAMEBUFFER_DIR)/src/kitty_framebuffer_internal.h \
-	$(KITTY_FRAMEBUFFER_DIR)/include/kitty_framebuffer.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
-
-src/vendor_soft_raster.o: $(SOFT_RASTER_DIR)/src/soft_raster.c \
-	$(SOFT_RASTER_DIR)/include/soft_raster.h \
-	$(SOFT_RASTER_DIR)/src/font8x16.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
-
-src/vendor_pcm_mixer.o: $(PCM_MIXER_DIR)/src/pcm_mixer.c \
-	$(PCM_MIXER_DIR)/include/pcm_mixer.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
-
-src/vendor_pcm_wav.o: $(PCM_MIXER_DIR)/src/pcm_wav.c \
-	$(PCM_MIXER_DIR)/include/pcm_mixer.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
 
 -include $(DEP)
 
