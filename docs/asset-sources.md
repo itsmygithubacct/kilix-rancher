@@ -21,11 +21,10 @@ assets from *Monster Rancher* or another commercial game are included.
 | `assets/font.ppm` | Hand-lettered display font — a 76-glyph monospace atlas (`A-Z a-z 0-9 . , ! ? : ' - / % + & ; ( )`) | Three generated glyph sheets (uppercase, lowercase, digits+punctuation) on flat magenta, sliced into cells by connected components with `font_atlas.py` and packed as GRAYSCALE-on-magenta; the renderer keys the magenta and multiplies each glyph's luminance by the requested text colour, so one atlas serves every UI colour. Used for text at scale ≥ 2; a built-in 5×7 bitmap covers tiny text and any glyph the atlas lacks |
 | `assets/rent.ppm` | The monthly rent collector, an original cozy landlord character generated with the local Gemini image tool (`gemini-3-pro-image`) | Rendered on flat green `#00ff00`, chroma-keyed to alpha, trimmed, centre-anchored into a 320×320 canvas and flattened over runtime magenta into binary P6; shown on the rent/eviction event, with a procedural coin-purse fallback when absent |
 
-This repository ships **only runtime assets**. The lossless generation sources,
-intermediates, and the `process_sprite.py` / `build_atlas.py` / `font_atlas.py`
-build scripts are kept out of the game tree under `<workspace>/kilix-rancher/`
-(see its `README.md`). The full recipe — model, prompts, chroma-key choice, and
-renderer contract — is at `<workspace>/image_generation.md`.
+This repository ships **only runtime assets**. Lossless generation sources,
+intermediates, and preprocessing scripts are not part of the distribution.
+The tables and prompts in this document are the published provenance record
+for the model, chroma-key choice, and renderer contract.
 
 ### Rival monster generation
 
@@ -37,9 +36,8 @@ on green `#00ff00`; the green creature (Mossnub) is generated on magenta
 background. `process_sprite.py` auto-detects the border key colour, so the same
 command processes either. The renderer (`draw_opponent` in `src/render.c`) keys
 magenta at draw time and ground-anchors each plate like the Kilix. The
-validated transparent Kilix intermediate lives with the other sources at
-`<workspace>/kilix-rancher/asset-sources/kilix.png`. Runtime PPM dimensions are
-enforced by `make validate-assets`.
+validated transparent intermediate is not distributed. Runtime PPM dimensions
+are enforced by `make validate-assets`.
 
 ### Kilix identity prompt
 
