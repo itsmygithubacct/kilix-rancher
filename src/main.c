@@ -1,8 +1,9 @@
 #include "kilix.h"
+#include "kilix_game_audio.h"     /* kilix_game_data_root_from_executable */
+#include "kilix_game_runtime.h"
 
 #include <errno.h>
 #include <math.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,31 +46,9 @@ int rng_range(int low, int high)
 
 void asset_paths_init(void)
 {
-    const char *override = getenv("KILIX_RANCHER_ASSETS");
-    if (override && *override) {
-        snprintf(asset_root, sizeof asset_root, "%s", override);
-        return;
-    }
-
-    char executable[640];
-    ssize_t length = readlink("/proc/self/exe", executable,
-                              sizeof executable - 1);
-    if (length <= 0) return;
-    executable[length] = '\0';
-    char *slash = strrchr(executable, '/');
-    if (!slash) return;
-    *slash = '\0';
-
-    char candidate[768];
-    snprintf(candidate, sizeof candidate, "%s/assets", executable);
-    if (access(candidate, F_OK) == 0) {
-        snprintf(asset_root, sizeof asset_root, "%s", candidate);
-        return;
-    }
-    snprintf(candidate, sizeof candidate,
-             "%s/../share/kilix-rancher/assets", executable);
-    if (access(candidate, F_OK) == 0)
-        snprintf(asset_root, sizeof asset_root, "%s", candidate);
+    (void)kilix_game_data_root_from_executable(
+        "KILIX_RANCHER_ASSETS", "assets", "../share/kilix-rancher/assets",
+        asset_root, sizeof asset_root);
 }
 
 const char *asset_path(const char *relative)
@@ -80,53 +59,6 @@ const char *asset_path(const char *relative)
     snprintf(buffers[index], sizeof buffers[index], "%s/%s",
              asset_root, relative);
     return buffers[index];
-}
-
-static double monotonic_seconds(void)
-{
-    struct timespec time;
-    clock_gettime(CLOCK_MONOTONIC, &time);
-    return (double)time.tv_sec + time.tv_nsec / 1000000000.0;
-}
-
-static void sleep_seconds(double seconds)
-{
-    if (seconds <= 0.0) return;
-    struct timespec delay;
-    delay.tv_sec = (time_t)seconds;
-    delay.tv_nsec = (long)((seconds - delay.tv_sec) * 1000000000.0);
-    nanosleep(&delay, NULL);
-}
-
-static void handle_signal(int signal_number)
-{
-    (void)signal_number;
-    term_emergency_restore();
-    _exit(1);
-}
-
-/* Crash-class signals: restore the terminal, then re-raise with the default
- * disposition so the process still dies with the right signal (and can dump
- * core). Without this a segfault/abort in game logic leaves the tty in raw
- * mode + alternate screen, making the user's shell unusable until `reset`.
- * term_emergency_restore uses only async-signal-safe calls. */
-static void handle_fatal_signal(int signal_number)
-{
-    term_emergency_restore();
-    signal(signal_number, SIG_DFL);
-    raise(signal_number);
-}
-
-static void install_signal_handlers(void)
-{
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
-    signal(SIGHUP, handle_signal);
-    signal(SIGSEGV, handle_fatal_signal);
-    signal(SIGABRT, handle_fatal_signal);
-    signal(SIGBUS, handle_fatal_signal);
-    signal(SIGFPE, handle_fatal_signal);
-    signal(SIGILL, handle_fatal_signal);
 }
 
 static bool ensure_directory(const char *path)
@@ -382,8 +314,8 @@ static void print_help(void)
            "  Left / Right     Change range during a live battle\n"
            "  Enter / Space    Confirm; call selected move\n"
            "  1-4              Call a battle move directly\n"
-           "  Esc              Back; cancels the arena Ready prompt with no\n"
-           "                   penalty, forfeits a match already underway\n"
+           "  Esc              Back; matches and drills cancel freely before\n"
+           "                   they begin, but are forfeited once underway\n"
            "  J                Journal (ranch/champion screen)\n"
            "  M                Toggle sound\n"
            "  Q                Quit from title/ranch/champion\n\n"
@@ -391,6 +323,109 @@ static void print_help(void)
            "  KILIX_RANCHER_ASSETS=/path   Override asset directory\n"
            "  KILIX_RANCHER_SAVE=/path     Override save file\n"
            "  KILIX_RANCHER_SKIP_PROBE=1   Skip Kitty protocol probe\n");
+}
+
+/* ---- interactive session over the shared kilix-game-kit host ----------- */
+
+typedef struct {
+    unsigned seed;
+    bool started;              /* app_start ran: the terminal came up */
+    bool key_repeat;           /* latest key event was keyboard auto-repeat */
+    int64_t next_present_ns;   /* 30 fps presentation pacing */
+    char error[256];           /* start-up failure detail, printed after run */
+} AppState;
+
+/* game.c asks this while counting mash-drill taps; only genuine presses may
+ * count there while auto-repeat stays welcome everywhere else. */
+static bool app_key_repeat;
+
+bool input_key_repeated(void)
+{
+    return app_key_repeat;
+}
+
+static int game_key_from_event(const kittykb_event *event)
+{
+    switch (event->key) {
+    case KITTYKB_KEY_ENTER: return KEY_ENTER;
+    case KITTYKB_KEY_BACKSPACE: return KEY_BACKSPACE;
+    case KITTYKB_KEY_TAB: return KEY_TAB;
+    case KITTYKB_KEY_ESCAPE: return KEY_ESC;
+    case KITTYKB_KEY_UP: return KEY_UP;
+    case KITTYKB_KEY_DOWN: return KEY_DOWN;
+    case KITTYKB_KEY_LEFT: return KEY_LEFT;
+    case KITTYKB_KEY_RIGHT: return KEY_RIGHT;
+    default: return event->key <= 0x7fU ? (int)event->key : -1;
+    }
+}
+
+static bool app_start(kilix_game_host *host, void *user)
+{
+    AppState *app = user;
+    kittyts_session *terminal = kilix_game_host_terminal(host);
+
+    app->started = true;
+    game_init(app->seed, false);
+    if (!render_init(kittyts_width(terminal), kittyts_height(terminal),
+                     app->error, sizeof app->error))
+        return false;
+    (void)sound_init();
+    return true;
+}
+
+static void app_event(kilix_game_host *host, void *user,
+                      const kittyin_event *event)
+{
+    (void)user;
+    if (event->kind != KITTYIN_EVENT_KEY) return;
+    const kittykb_event *key_event = &event->data.key;
+    if (key_event->action == KITTYKB_ACTION_RELEASE) return;
+    if ((key_event->modifiers & KITTYKB_MOD_CTRL) &&
+        (key_event->key == 'c' || key_event->key == 'C')) {
+        G.quit = true;
+        kilix_game_host_request_stop(host);
+        return;
+    }
+    int key = game_key_from_event(key_event);
+    if (key < 0) return;
+    app_key_repeat = key_event->action == KITTYKB_ACTION_REPEAT;
+    game_handle_key(key);
+}
+
+static bool app_step(kilix_game_host *host, void *user, double step_seconds)
+{
+    (void)user;
+    game_tick((float)step_seconds);
+    if (G.quit) kilix_game_host_request_stop(host);
+    return true;
+}
+
+static bool app_render(kilix_game_host *host, void *user, double alpha)
+{
+    AppState *app = user;
+    kittyts_session *terminal = kilix_game_host_terminal(host);
+    int width, height;
+
+    (void)alpha;
+    if (kittyts_check_resize(terminal, &width, &height))
+        render_resize(width, height);
+    /* Input and simulation run at the host's full rate; the expensive parts —
+     * the full-screen illustrated repaint and the Kitty pixel upload — are
+     * paced at 30 fps. */
+    int64_t now = kilix_game_monotonic_ns();
+    if (now < app->next_present_ns) return true;
+    app->next_present_ns = now + KILIX_GAME_NANOSECONDS_PER_SECOND / 30;
+    render_frame();
+    (void)kittyts_present(terminal, render_fb(), G.W, G.H);
+    return true;
+}
+
+static void app_stop(kilix_game_host *host, void *user)
+{
+    (void)host;
+    (void)user;
+    sound_shutdown();
+    render_shutdown();
 }
 
 int main(int argc, char **argv)
@@ -427,62 +462,37 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    /* Install before term_init: term_init enters raw mode and can then block
-     * in the graphics probe for up to ~2 s, and a signal (SSH drop, SIGTERM,
-     * a crash) during that window must still restore the terminal.
-     * term_emergency_restore no-ops safely until raw mode is actually on. */
-    install_signal_handlers();
-    int width, height;
-    if (!term_init(&width, &height))
-        return 1;   /* term_init prints a specific reason for every failure */
+    /* The shared host owns raw mode, the graphics probe, fixed-step timing
+     * (60 Hz simulation, 8-step cap with debt dropped, so slow frames never
+     * replay as a fast-forward burst), orderly SIGINT/SIGTERM/SIGHUP stops,
+     * Ctrl-Z terminal-safe suspension, and crash-signal terminal restore. */
+    AppState app = {0};
+    kilix_game_host host;
+    kilix_game_host_options options;
+    kilix_game_host_callbacks callbacks = {
+        app_start, app_event, app_step, app_render, app_stop
+    };
 
-    game_init(seed, false);
-    char error[256];
-    if (!render_init(width, height, error, sizeof error)) {
-        term_shutdown();
-        fprintf(stderr, "kilix-rancher: %s\n", error);
-        return 1;
+    app.seed = seed;
+    kilix_game_host_options_init(&options);
+    options.terminal.framebuffer.min_width = 640;
+    options.terminal.framebuffer.min_height = 360;
+    options.terminal.framebuffer.max_width = 1440;
+    options.terminal.framebuffer.max_height = 900;
+    options.terminal.framebuffer.probe_timeout_ms = 2000;
+    if (getenv("KILIX_RANCHER_SKIP_PROBE"))
+        options.terminal.framebuffer.probe_graphics = false;
+
+    int result = kilix_game_host_run(&host, &options, &callbacks, &app);
+    if (result != EXIT_SUCCESS) {
+        if (app.error[0])
+            fprintf(stderr, "kilix-rancher: %s\n", app.error);
+        else if (!app.started)
+            fprintf(stderr, "kilix-rancher: terminal setup failed: %s\n",
+                    strerror(host.terminal_errno ? host.terminal_errno
+                                                 : ENOTSUP));
+        else
+            fprintf(stderr, "kilix-rancher: the session ended unexpectedly\n");
     }
-    sound_init();
-
-    double previous = monotonic_seconds();
-    double accumulator = 0.0;
-    double next_frame = previous;
-    while (!G.quit) {
-        int key;
-        while ((key = term_poll_key()) >= 0)
-            game_handle_key(key);
-
-        int resized_width, resized_height;
-        if (term_check_resize(&resized_width, &resized_height))
-            render_resize(resized_width, resized_height);
-
-        double now = monotonic_seconds();
-        double elapsed = now - previous;
-        previous = now;
-        if (elapsed > 0.15) elapsed = 0.15;
-        accumulator += elapsed;
-        int steps = 0;
-        while (accumulator >= TICK_DT && steps++ < 8) {
-            game_tick(TICK_DT);
-            accumulator -= TICK_DT;
-        }
-        /* Drop any simulation debt the 8-step cap could not drain instead of
-         * banking it: otherwise sustained slow frames accumulate time that
-         * later replays as a fast-forward burst (a 60 s battle timer draining
-         * in an instant, enemy attacks warping) once the load subsides. */
-        if (accumulator > TICK_DT)
-            accumulator = TICK_DT;
-        if (now >= next_frame) {
-            render_frame();
-            term_present(render_fb(), G.W, G.H);
-            next_frame = now + 1.0 / 30.0;
-        }
-        sleep_seconds(0.0015);
-    }
-
-    sound_shutdown();
-    render_shutdown();
-    term_shutdown();
-    return 0;
+    return result;
 }

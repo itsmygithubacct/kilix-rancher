@@ -1,81 +1,69 @@
 #include "kilix.h"
-#include "pcmmix_bank.h"
+#include "kilix_game_audio.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+/* The 23 bundled variations across the six cues. Every cue is optional: with
+ * assets missing or no usable mixer the game stays fully playable, silent.
+ * Variant selection (random, no immediate repeat) comes from the shared cue
+ * bank. */
+#define SFX(id, variant, file) {(uint32_t)(id), (variant), (file), \
+                                1.0f, 1.0f, false}
 
-static const char *const SFX_FILES[SFX_COUNT] = {
-    [SFX_MOVE] = "sfx/move.wav",
-    [SFX_CONFIRM] = "sfx/confirm.wav",
-    [SFX_TRAIN] = "sfx/train.wav",
-    [SFX_HIT] = "sfx/hit.wav",
-    [SFX_WIN] = "sfx/win.wav",
-    [SFX_LOSE] = "sfx/lose.wav"
+static const kilix_game_audio_cue_spec SFX_SPECS[] = {
+    SFX(SFX_MOVE, 0u, "sfx/move.wav"),
+    SFX(SFX_MOVE, 1u, "sfx/move_v02.wav"),
+    SFX(SFX_MOVE, 2u, "sfx/move_v03.wav"),
+    SFX(SFX_MOVE, 3u, "sfx/move_v04.wav"),
+    SFX(SFX_CONFIRM, 0u, "sfx/confirm.wav"),
+    SFX(SFX_CONFIRM, 1u, "sfx/confirm_v02.wav"),
+    SFX(SFX_CONFIRM, 2u, "sfx/confirm_v03.wav"),
+    SFX(SFX_TRAIN, 0u, "sfx/train.wav"),
+    SFX(SFX_TRAIN, 1u, "sfx/train_v02.wav"),
+    SFX(SFX_TRAIN, 2u, "sfx/train_v03.wav"),
+    SFX(SFX_TRAIN, 3u, "sfx/train_v04.wav"),
+    SFX(SFX_HIT, 0u, "sfx/hit.wav"),
+    SFX(SFX_HIT, 1u, "sfx/hit_v02.wav"),
+    SFX(SFX_HIT, 2u, "sfx/hit_v03.wav"),
+    SFX(SFX_HIT, 3u, "sfx/hit_v04.wav"),
+    SFX(SFX_HIT, 4u, "sfx/hit_v05.wav"),
+    SFX(SFX_HIT, 5u, "sfx/hit_v06.wav"),
+    SFX(SFX_WIN, 0u, "sfx/win.wav"),
+    SFX(SFX_WIN, 1u, "sfx/win_v02.wav"),
+    SFX(SFX_WIN, 2u, "sfx/win_v03.wav"),
+    SFX(SFX_LOSE, 0u, "sfx/lose.wav"),
+    SFX(SFX_LOSE, 1u, "sfx/lose_v02.wav"),
+    SFX(SFX_LOSE, 2u, "sfx/lose_v03.wav"),
 };
 
-static const uint8_t SFX_VARIANTS[SFX_COUNT] = {
-    [SFX_MOVE] = 4,
-    [SFX_CONFIRM] = 3,
-    [SFX_TRAIN] = 4,
-    [SFX_HIT] = 6,
-    [SFX_WIN] = 3,
-    [SFX_LOSE] = 3,
-};
-
-static pcmmix_bank sound_bank;
-static pcmmix mixer;
-static bool mixer_started;
-
-static bool variant_filename(const char *base, unsigned variant,
-                             char *out, size_t size)
-{
-    if (variant == 0) return snprintf(out, size, "%s", base) < (int)size;
-    const char *extension = strrchr(base, '.');
-    if (!extension) return false;
-    return snprintf(out, size, "%.*s_v%02u%s", (int)(extension - base), base,
-                    variant + 1, extension) < (int)size;
-}
+static kilix_game_audio audio;
 
 bool sound_init(void)
 {
-    pcmmix_options options;
-    char relative[96], error[256];
+    kilix_game_audio_options options;
+    char error[256];
 
-    (void)pcmmix_bank_init(&sound_bank, SFX_COUNT, 0x4b17c4e5u);
     if (G.headless) return false;
-    for (int id = 0; id < SFX_COUNT; id++) {
-        for (unsigned variant = 0; variant < SFX_VARIANTS[id]; variant++) {
-            if (!variant_filename(SFX_FILES[id], variant, relative,
-                                  sizeof relative))
-                continue;
-            const char *path = asset_path(relative);
-            (void)pcmmix_bank_load_wav(&sound_bank, (uint32_t)id, variant,
-                                       path, 1.0f, 1.0f,
-                                       error, sizeof error);
-        }
-    }
-    pcmmix_options_init(&options);
-    if (!pcmmix_start(&mixer, &options)) {
-        pcmmix_bank_clear(&sound_bank);
+    kilix_game_audio_options_init(&options);
+    options.cue_count = SFX_COUNT;
+    options.random_seed = 0x4b17c4e5u;
+    /* asset_paths_init already located the asset root; resolve cue paths
+     * beneath it rather than re-deriving roots here. */
+    options.data.local_root = asset_path("");
+    options.cues = SFX_SPECS;
+    options.cue_spec_count = sizeof SFX_SPECS / sizeof SFX_SPECS[0];
+    if (!kilix_game_audio_init(&audio, &options, error, sizeof error))
         return false;
-    }
-    mixer_started = true;
-    return true;
+    return kilix_game_audio_is_running(&audio);
 }
 
 void sound_play(SoundId id)
 {
-    if (!mixer_started || G.headless || !G.sound_on ||
-        (int)id < 0 || id >= SFX_COUNT)
+    if (G.headless || !G.sound_on || (int)id < 0 || id >= SFX_COUNT)
         return;
-    (void)pcmmix_bank_play(&mixer, &sound_bank, (uint32_t)id,
-                           1.0f, 1.0f);
+    (void)kilix_game_audio_play(&audio, (uint32_t)id,
+                                KILIX_GAME_AUDIO_BUS_SFX, 1.0f, 1.0f);
 }
 
 void sound_shutdown(void)
 {
-    if (mixer_started) pcmmix_stop(&mixer);
-    mixer_started = false;
-    pcmmix_bank_clear(&sound_bank);
+    kilix_game_audio_shutdown(&audio);
 }

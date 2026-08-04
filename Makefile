@@ -1,3 +1,7 @@
+# Shared build fragments define internal archive targets; bare `make` must
+# still build the runnable game.
+.DEFAULT_GOAL := all
+
 CC ?= cc
 KILIX_GAME_KIT_DIR ?= third_party/kilix-game-kit
 include $(KILIX_GAME_KIT_DIR)/mk/game-kit.mk
@@ -11,7 +15,7 @@ LDLIBS += $(KILIX_GAME_KIT_LDLIBS)
 # `make CFLAGS=...` override, which would otherwise replace CFLAGS wholesale.
 
 BIN = kilix-rancher
-SRC = src/main.c src/game.c src/render.c src/term.c src/sound.c
+SRC = src/main.c src/game.c src/render.c src/sound.c
 OBJ = $(SRC:.c=.o)
 DEP = $(OBJ:.o=.d)
 
@@ -40,12 +44,13 @@ $(BIN): $(OBJ) $(KILIX_GAME_KIT_LIB)
 src/%.o: src/%.c src/kilix.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -MMD -MP -c -o $@ $<
 
-src/sound.o: $(PCM_MIXER_DIR)/include/pcmmix_bank.h
+src/sound.o: $(KILIX_GAME_KIT_DIR)/include/kilix_game_audio.h \
+	$(PCM_MIXER_DIR)/include/pcmmix_bank.h
 src/game.o: $(KILIX_STATE_DIR)/include/kilix_state.h
 src/render.o: $(SOFT_RASTER_DIR)/include/soft_raster.h
-src/term.o: $(KITTY_KEYBOARD_DIR)/include/kitty_keyboard.h \
-	$(KITTY_KEYBOARD_DIR)/include/kitty_keyboard_posix.h \
-	$(KITTY_FRAMEBUFFER_DIR)/include/kitty_framebuffer.h
+src/main.o: $(KILIX_GAME_KIT_DIR)/include/kilix_game_runtime.h \
+	$(KILIX_GAME_KIT_DIR)/include/kilix_game_audio.h \
+	$(KITTY_TERMINAL_SESSION_DIR)/include/kitty_terminal_session.h
 
 -include $(DEP)
 

@@ -154,6 +154,13 @@ static void draw_line(float x0, float y0, float x1, float y1, float width,
 static void rounded_rect(int x, int y, int width, int height, int radius,
                          uint32_t color, float alpha)
 {
+    if (width <= 0 || height <= 0) return;
+    /* Keep the corner discs inside the rect: past this limit the "right"
+     * corners sit left of the "left" corners and the shape paints wider than
+     * `width` (a nearly-empty progress bar would render as a blob spilling
+     * outside its track). */
+    int limit = ((width < height ? width : height) - 1) / 2;
+    if (radius > limit) radius = limit;
     if (radius < 1) {
         fill_rect(x, y, width, height, color, alpha);
         return;
@@ -226,6 +233,7 @@ static const uint8_t *glyph_for(char character)
 
 static int text_width(const char *text, int scale)
 {
+    if (!*text) return 0;
     return (int)strlen(text) * 6 * scale - scale;
 }
 
@@ -335,45 +343,12 @@ static void draw_text_right(int right, int y, const char *text,
     draw_text(right - text_width(text, scale), y, text, color, alpha, scale);
 }
 
-static void draw_wrapped_text(int x, int y, int width, const char *text,
-                              uint32_t color, float alpha, int scale,
-                              int max_lines)
-{
-    char line[160] = {0};
-    int line_length = 0;
-    int lines = 0;
-    int max_characters = width / (6 * scale);
-    const char *word = text;
-    while (*word && lines < max_lines) {
-        while (*word == ' ') word++;
-        const char *end = word;
-        while (*end && *end != ' ') end++;
-        int word_length = (int)(end - word);
-        if (line_length && line_length + 1 + word_length > max_characters) {
-            draw_text(x, y + lines * 9 * scale, line, color, alpha, scale);
-            lines++;
-            line[0] = '\0';
-            line_length = 0;
-            if (lines >= max_lines) break;
-        }
-        if (line_length) line[line_length++] = ' ';
-        int copy = word_length;
-        if (copy > (int)sizeof line - line_length - 1)
-            copy = (int)sizeof line - line_length - 1;
-        memcpy(line + line_length, word, (size_t)copy);
-        line_length += copy;
-        line[line_length] = '\0';
-        word = end;
-    }
-    if (line_length && lines < max_lines)
-        draw_text(x, y + lines * 9 * scale, line, color, alpha, scale);
-}
-
-/* Word-wrap centered on cx within `width`; returns the number of lines drawn so
- * the caller can flow following content below it. */
-static int draw_wrapped_center(int cx, int y, int width, const char *text,
-                               uint32_t color, float alpha, int scale,
-                               int max_lines)
+/* Word-wrap within `width`; `x` is the left edge, or the center when
+ * `centered`. Returns the number of lines drawn so the caller can flow
+ * following content below it. */
+static int draw_wrapped(int x, int y, int width, const char *text,
+                        uint32_t color, float alpha, int scale,
+                        int max_lines, bool centered)
 {
     char line[160] = {0};
     int line_length = 0, lines = 0;
@@ -386,7 +361,11 @@ static int draw_wrapped_center(int cx, int y, int width, const char *text,
         while (*end && *end != ' ') end++;
         int word_length = (int)(end - word);
         if (line_length && line_length + 1 + word_length > max_characters) {
-            draw_text_center(cx, y + lines * 9 * scale, line, color, alpha, scale);
+            if (centered)
+                draw_text_center(x, y + lines * 9 * scale, line, color, alpha,
+                                 scale);
+            else
+                draw_text(x, y + lines * 9 * scale, line, color, alpha, scale);
             lines++;
             line[0] = '\0';
             line_length = 0;
@@ -402,10 +381,29 @@ static int draw_wrapped_center(int cx, int y, int width, const char *text,
         word = end;
     }
     if (line_length && lines < max_lines) {
-        draw_text_center(cx, y + lines * 9 * scale, line, color, alpha, scale);
+        if (centered)
+            draw_text_center(x, y + lines * 9 * scale, line, color, alpha,
+                             scale);
+        else
+            draw_text(x, y + lines * 9 * scale, line, color, alpha, scale);
         lines++;
     }
     return lines;
+}
+
+static void draw_wrapped_text(int x, int y, int width, const char *text,
+                              uint32_t color, float alpha, int scale,
+                              int max_lines)
+{
+    draw_wrapped(x, y, width, text, color, alpha, scale, max_lines, false);
+}
+
+static int draw_wrapped_center(int cx, int y, int width, const char *text,
+                               uint32_t color, float alpha, int scale,
+                               int max_lines)
+{
+    return draw_wrapped(cx, y, width, text, color, alpha, scale, max_lines,
+                        true);
 }
 
 static Bitmap load_ppm(const char *path)
@@ -629,7 +627,12 @@ static void draw_kilix(float anchor_x, float ground_y, float size, bool flip,
         tint = 0x8395A4;
         tint_amount = 0.17f;
     } else if (pose == 3) {
-        float attack = sinf(clampf(G.battle.phase_timer * 8.0f, 0.0f, 3.14159f));
+        /* In battle the lunge tracks the attack phase; elsewhere (Dojo card,
+         * Academy montage) G.battle.phase_timer is stale, so repeat a practice
+         * pounce on a fixed cadence instead. */
+        float lunge_time = G.screen == SCREEN_BATTLE ? G.battle.phase_timer
+                                                     : fmodf(G.time, 1.4f);
+        float attack = sinf(clampf(lunge_time * 8.0f, 0.0f, 3.14159f));
         x_shift = attack * 92.0f;
         squash = 1.0f + attack * 0.12f;
         stretch = 1.0f - attack * 0.08f;
@@ -842,6 +845,9 @@ static void draw_ranch(void)
     rounded_rect(316, 386, 358, 72, 13, 0xFFF0C9, 0.91f);
     fill_triangle(492, 386, 513, 366, 535, 386, 0xFFF0C9, 0.91f);
     const char *message = G.toast_timer > 0.0f ? G.toast :
+        G.kilix.hunger >= HUNGER_STARVE ?
+            "MY TUMMY ECHOES... I CAN'T GROW LIKE THIS. STEW?" :
+        G.kilix.hunger >= HUNGER_WARN ? "COULD WE SHARE A SNACK SOON?" :
         G.kilix.fatigue > 78 ? "MY FLAME FEELS SMALL... MAYBE A CATNAP?" :
         G.kilix.stress > 74 ? "CAN WE SLOW DOWN THIS WEEK?" :
         G.kilix.bond > 70 ? "WHATEVER WE DO, LET'S DO IT TOGETHER!" :
@@ -942,17 +948,12 @@ static void draw_training(void)
              DRILLS[index].max_gain, STAT_NAMES[DRILLS[index].secondary],
              (DRILLS[index].max_gain + 1) / 2);
     draw_text(487, 400, detail, 0x9DD7BE, 0.95f, 1);
-    int chance = DRILLS[index].success;
-    chance += G.kilix.stats.value[STAT_SKILL] / 35;
-    chance += G.kilix.bond / 18;
-    chance += (G.kilix.form - 50) / 9;
-    chance -= G.kilix.fatigue / 4;
-    chance -= G.kilix.stress / 5;
-    chance = clampi(chance, 12, 96);
-    snprintf(detail, sizeof detail, "SUCCESS %d%%   FATIGUE +%d   STRESS +%d",
-             chance, DRILLS[index].fatigue, DRILLS[index].stress);
+    /* The multiplier applied to the drill's mini-game score (game.c). */
+    int condition = (int)lroundf(game_drill_condition(index) * 100.0f);
+    snprintf(detail, sizeof detail, "CONDITION %d%%   FATIGUE +%d   STRESS +%d",
+             condition, DRILLS[index].fatigue, DRILLS[index].stress);
     draw_text(487, 425, detail,
-              chance < 50 ? CORAL : GOLD, 0.95f, 1);
+              condition < 90 ? CORAL : GOLD, 0.95f, 1);
     if (G.kilix.fatigue >= 82)
         draw_text(487, 446, "TOO TIRED - TAKE A CATNAP FIRST", CORAL, 1.0f, 1);
     draw_footer("UP / DOWN  SELECT     ENTER  TRAIN ONE WEEK     ESC  RANCH");
@@ -990,6 +991,12 @@ static void draw_care(void)
              "FATIGUE %d   STRESS %d   BOND %+d   FORM %+d",
              ITEMS[index].fatigue, ITEMS[index].stress,
              ITEMS[index].bond, ITEMS[index].form);
+    /* Satiety is what separates food from grooming: show it. */
+    if (ITEMS[index].satiety > 0) {
+        size_t used = strlen(effects);
+        snprintf(effects + used, sizeof effects - used,
+                 "   HUNGER -%d", ITEMS[index].satiety);
+    }
     draw_wrapped_text(598, 371, 275, effects, INK, 1.0f, 1, 3);
     draw_footer("UP / DOWN  SELECT     ENTER  SHARE & ADVANCE WEEK     ESC  RANCH");
 }
@@ -1000,14 +1007,14 @@ static void draw_arena(void)
     draw_header("FESTIVAL ARENA");
     panel(25, 69, 300, 398, NIGHT, 0.91f);
     draw_text(49, 91, "LEAGUE BOARD", GOLD, 1.0f, 2);
-    draw_text(50, 117, "DEFEAT YOUR CURRENT RIVAL", CREAM, 0.69f, 1);
+    draw_text(50, 117, "BEAT YOUR RIVAL - OR REMATCH FOR COIN", CREAM, 0.69f, 1);
     for (int i = 0; i < OPPONENT_COUNT; i++) {
         char label[64];
         snprintf(label, sizeof label, "%s  %s", RANK_NAMES[i], OPPONENTS[i].name);
         const char *hint = i == G.kilix.rank ? "READY" :
-                           i < G.kilix.rank ? "CLEARED" : "LOCKED";
+                           i < G.kilix.rank ? "REMATCH" : "LOCKED";
         draw_choice(49, 145 + i * 49, 252, 40, label, hint,
-                    G.arena_cursor == i, i == G.kilix.rank);
+                    G.arena_cursor == i, i <= G.kilix.rank);
     }
 
     int index = clampi(G.arena_cursor, 0, OPPONENT_COUNT - 1);
@@ -1017,7 +1024,10 @@ static void draw_arena(void)
     draw_text_center(792, 145, OPPONENTS[index].epithet, 0xD6B97F, 0.82f, 1);
     draw_opponent(index, 792, 380, 255, 0);
     char value[64];
-    snprintf(value, sizeof value, "PRIZE  %d G", OPPONENTS[index].prize);
+    if (index < G.kilix.rank)      /* exhibition rematch pays half */
+        snprintf(value, sizeof value, "PURSE  %d G", OPPONENTS[index].prize / 2);
+    else
+        snprintf(value, sizeof value, "PRIZE  %d G", OPPONENTS[index].prize);
     draw_text_center(792, 409, value, GOLD, 1.0f, 2);
     snprintf(value, sizeof value, "RATING  %d",
              (OPPONENTS[index].stats.value[0] +
@@ -1035,8 +1045,9 @@ static void draw_arena(void)
         snprintf(challenge, sizeof challenge, "%s IS YOUR %s LEAGUE RIVAL. READY?",
                  OPPONENTS[index].name, RANK_NAMES[index]);
     else if (index < G.kilix.rank)
-        snprintf(challenge, sizeof challenge, "YOU ALREADY CLEARED %s LEAGUE.",
-                 RANK_NAMES[index]);
+        snprintf(challenge, sizeof challenge,
+                 "%s WILL SPAR AGAIN FOR HALF THE PURSE.",
+                 OPPONENTS[index].name);
     else
         snprintf(challenge, sizeof challenge, "WIN %s LEAGUE TO UNLOCK THIS RIVAL.",
                  RANK_NAMES[index - 1]);
@@ -1113,14 +1124,19 @@ static void draw_move_cards(void)
         snprintf(number, sizeof number, "%d", i + 1);
         fill_circle(x + 21, 464, 12, selected ? GOLD : 0x41575C, 1.0f);
         draw_text_center(x + 21, 460, number, INK, 1.0f, 1);
+        /* Grays and coral read well on the dark cards but vanish on the
+         * selected card's bright orange, so that card gets dark-ink text. */
         draw_text(x + 41, 456, MOVES[i].name,
-                  ready ? CREAM : 0x8E9390, known ? 1.0f : 0.55f, 1);
+                  ready ? CREAM : (selected ? INK : 0x8E9390),
+                  known ? 1.0f : 0.55f, 1);
         if (!known) {
             /* Locked until bought at the Dojo. */
             char lock[40];
             snprintf(lock, sizeof lock, "LOCKED - %d g", MOVES[i].price);
-            draw_text(x + 16, 485, lock, 0x9CA49E, 0.7f, 1);
-            draw_text(x + 16, 501, "LEARN AT THE DOJO", 0xCE9468, 0.85f, 1);
+            draw_text(x + 16, 485, lock, selected ? INK : 0x9CA49E,
+                      selected ? 0.85f : 0.7f, 1);
+            draw_text(x + 16, 501, "LEARN AT THE DOJO",
+                      selected ? INK : 0xCE9468, 0.85f, 1);
             continue;
         }
         char detail[48];
@@ -1128,10 +1144,12 @@ static void draw_move_cards(void)
                  MOVES[i].cost, (int)MOVES[i].min_range,
                  (int)MOVES[i].max_range);
         draw_text(x + 16, 485, detail,
-                  in_range ? GOLD : 0x9CA49E, in_range ? 0.95f : 0.62f, 1);
+                  selected ? INK : (in_range ? GOLD : 0x9CA49E),
+                  in_range ? 0.95f : (selected ? 0.8f : 0.62f), 1);
         draw_text(x + 16, 501,
                   !in_range ? "OUT OF RANGE" : !affordable ? "NEED WILL" : "READY",
-                  ready ? 0x9DDBB4 : CORAL, 0.9f, 1);
+                  selected ? (ready ? 0x1E5232 : 0x651D14)
+                           : (ready ? 0x9DDBB4 : CORAL), 0.95f, 1);
     }
 }
 
@@ -1253,8 +1271,9 @@ static void draw_event(void)
             draw_bitmap_scaled(&care_sprites[ci], 168, (int)(232 + bob),
                                170, 170, false, 0xFFFFFF, 0.0f, 1.0f);
         } else {
-            fill_circle(828, 414, 42, 0xB66B3F, 1.0f);
-            fill_circle(828, 408, 34, CREAM, 1.0f);
+            /* Fallback bowl sits where the sprite would, under the embers. */
+            fill_circle(253, (int)(340 + bob), 42, 0xB66B3F, 1.0f);
+            fill_circle(253, (int)(334 + bob), 34, CREAM, 1.0f);
         }
         for (int i = 0; i < 4; i++)
             draw_ember(250 + i * 12, 300 + (i & 1) * 8, G.time * 3 + i, 2.2f);
@@ -1758,7 +1777,7 @@ static void draw_drill(void)
             bool on = lit == i || pressed == i;
             fill_circle(cx, 430, on ? 46 : 33, cols[i], on ? 1.0f : 0.55f);
             fill_circle(cx, 430, on ? 46 : 33, 0xFFFFFF, on ? 0.28f : 0.0f);
-            char lab[4]; snprintf(lab, sizeof lab, "%d", i + 1);
+            char lab[16]; snprintf(lab, sizeof lab, "%d", i + 1);
             draw_text_center(cx, 422, lab, INK, 1.0f, 2);
         }
         /* Status line: WATCH while revealing, REPEAT while the player answers. */

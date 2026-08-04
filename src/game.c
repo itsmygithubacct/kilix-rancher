@@ -566,6 +566,31 @@ static MinigameType drill_minigame(int index)
     }
 }
 
+/* The condition-dependent part of a drill's outcome, shared by the headless
+ * success roll and the interactive score multiplier (and the training screen,
+ * which shows the multiplier). */
+static int drill_chance(const DrillInfo *drill)
+{
+    int chance = drill->success;
+    chance += G.kilix.stats.value[STAT_SKILL] / 35;
+    chance += G.kilix.bond / 18;
+    chance += (G.kilix.form - 50) / 9;
+    chance -= G.kilix.fatigue / 4;
+    chance -= G.kilix.stress / 5;
+    return clampi(chance, 12, 96);
+}
+
+/* Interactive drills keep the player's mini-game score but scale it by
+ * condition: a rested, bonded Kilix in form keeps (or slightly beats) its
+ * earned score, an exhausted or stressed one can at worst halve it — so the
+ * catnap/care loop matters in interactive play exactly as the training screen
+ * promises. */
+float game_drill_condition(int drill_index)
+{
+    const DrillInfo *drill = &DRILLS[clampi(drill_index, 0, DRILL_COUNT - 1)];
+    return clampf((float)drill_chance(drill) / drill->success, 0.5f, 1.15f);
+}
+
 /* Apply a drill's outcome and open its result event. `quality` in [0,1] drives
  * the interactive path; the deterministic path (headless render-test and the
  * scripted selftest) draws the same three RNG rolls as before so growth stays
@@ -581,17 +606,11 @@ static void resolve_drill(int index, float quality, bool use_rng)
         int success_roll = rng_range(1, 100);
         gain_roll = rng_range(drill->min_gain, drill->max_gain);
         int great_roll = rng_range(1, 100);
-        int chance = drill->success;
-        chance += G.kilix.stats.value[STAT_SKILL] / 35;
-        chance += G.kilix.bond / 18;
-        chance += (G.kilix.form - 50) / 9;
-        chance -= G.kilix.fatigue / 4;
-        chance -= G.kilix.stress / 5;
-        chance = clampi(chance, 12, 96);
-        success = success_roll <= chance;
+        success = success_roll <= drill_chance(drill);
         great = success && great_roll <= clampi(5 + G.kilix.bond / 5, 5, 30);
     } else {
-        quality = clampf(quality, 0.0f, 1.0f);
+        quality = clampf(clampf(quality, 0.0f, 1.0f) *
+                         game_drill_condition(index), 0.0f, 1.0f);
         success = quality >= 0.30f;
         great = quality >= 0.82f;
         gain_roll = drill->min_gain +
@@ -684,7 +703,9 @@ static void enter_drill(int index)
     case MG_TIMING:   m->rounds = 3; break;
     case MG_REACTION: m->rounds = 3; break;
     case MG_MEMORY:   m->rounds = 3; break;
-    case MG_MASH:     m->rounds = 1; m->taps_target = 26; break;
+    /* 20 taps in 4 s: a full gauge takes brisk but honest mashing now that
+     * auto-repeat no longer counts (26 assumed some repeat inflation). */
+    case MG_MASH:     m->rounds = 1; m->taps_target = 20; break;
     case MG_HOLD:     m->rounds = 1; m->marker = 0.5f; m->target = 0.5f;
                       m->half = 0.15f; break;
     case MG_RHYTHM:   m->rounds = RHY_BEATS; break;
@@ -839,10 +860,26 @@ static void minigame_tick(float dt)
 static void minigame_key(int key)
 {
     MinigameState *m = &G.minigame;
-    if (key == KEY_ESC) {                        /* abort — no week spent */
-        game_go_ranch();
-        change_screen(SCREEN_TRAINING);
-        game_show_toast("Drill called off. No week was spent.");
+    if (key == KEY_ESC) {
+        /* Mirrors the arena: backing out during the get-ready countdown is
+         * free, but a drill already underway is forfeited — the week is spent
+         * and the rounds played so far are the result. Anything else would
+         * let the player discard a weak session (worst of all at the result
+         * screen, where the exact score is visible) and reroll for free. */
+        if (m->phase == 0) {
+            game_go_ranch();
+            change_screen(SCREEN_TRAINING);
+            game_show_toast("Drill called off. No week was spent.");
+        } else if (m->phase == 1) {
+            if (m->type == MG_MASH)
+                m->quality = (float)m->taps /
+                             (m->taps_target > 0 ? m->taps_target : 1);
+            else
+                m->quality /= m->rounds > 0 ? m->rounds : 1;
+            resolve_drill(m->drill, m->quality, false);
+        } else {
+            resolve_drill(m->drill, m->quality, false);
+        }
         return;
     }
     if (m->phase == 0)                           /* let the countdown run */
@@ -850,7 +887,7 @@ static void minigame_key(int key)
     if (m->phase == 2) {                         /* result -> apply reward.
          * Enter only: the drills are played with SPACE, so accepting Space
          * here would let a held/mashed Space blow past the result unseen. */
-        if (is_enter_key(key) || key == KEY_ESC)
+        if (is_enter_key(key))
             resolve_drill(m->drill, m->quality, false);
         return;
     }
@@ -888,7 +925,9 @@ static void minigame_key(int key)
         }
         break;
     case MG_MASH:
-        if (is_confirm_key(key)) {
+        /* Physical presses only: holding the key down would otherwise pump
+         * the gauge with auto-repeat events. */
+        if (is_confirm_key(key) && !input_key_repeated()) {
             m->taps++;
             m->feedback = 0.12f;
         }
@@ -1038,6 +1077,7 @@ static void academy_finish(void)
     G.event.index = stat;          /* stat index == its drill emblem index */
     G.event.primary = (StatKind)stat;
     G.event.gain_primary = ACADEMY_GAIN;
+    G.event.money_delta = -ACADEMY_COST;   /* paid at booking; shown here */
     G.event.success = true;
     play_sound(SFX_WIN);
 }
@@ -1081,10 +1121,13 @@ static void bank_action(int which)
     switch (which) {
     case 0: bank_move(100); break;
     case 1: bank_move(500); break;
-    case 2: bank_move(G.money); break;          /* deposit everything */
+    /* "Everything" with an empty purse/vault passes 1 g instead of 0 so the
+     * request still reaches bank_move's "nothing to move" toasts rather than
+     * dying in its silent zero-amount branch. */
+    case 2: bank_move(G.money > 0 ? G.money : 1); break;   /* deposit all */
     case 3: bank_move(-100); break;
     case 4: bank_move(-500); break;
-    case 5: bank_move(-G.bank); break;          /* withdraw everything */
+    case 5: bank_move(G.bank > 0 ? -G.bank : -1); break;   /* withdraw all */
     default: break;
     }
 }
@@ -1119,8 +1162,11 @@ void game_start_battle(int opponent)
         return;
     }
     rival = &OPPONENTS[opponent];
-    if (rival->rank != G.kilix.rank) {
-        game_show_toast("Only your current league rival can accept this challenge.");
+    if (rival->rank > G.kilix.rank) {
+        /* Cleared leagues stay open for exhibition rematches (half prize, no
+         * promotion — see settle_battle), so a struggling ranch always has a
+         * way to earn rent; only higher leagues are locked. */
+        game_show_toast("Win your current league before challenging that rival.");
         play_sound(SFX_MOVE);
         return;
     }
@@ -1493,26 +1539,39 @@ static void settle_battle(void)
         return;
     rival = &OPPONENTS[battle->opponent];
     fought_rank = rival->rank;
+    /* A cleared league's rival fights again as an exhibition: half prize,
+     * lighter glory, never a promotion. This keeps income possible in any
+     * week — without it, pre-Crown prize money is finite while rent is not,
+     * and a slow-growing ranch would face certain eviction. */
+    bool exhibition = fought_rank < G.kilix.rank;
 
     if (battle->winner > 0) {
         ++G.kilix.total_wins;
-        ++G.kilix.rank_wins;
-        prize = rival->prize;
+        prize = exhibition ? rival->prize / 2 : rival->prize;
         G.money = clampi(G.money + prize, 0, SAVE_MONEY_MAX);
         G.kilix.fatigue += 18;
         G.kilix.stress -= 5;
-        G.kilix.bond += 6;
-        G.kilix.form += 8;
+        G.kilix.bond += exhibition ? 2 : 6;
+        G.kilix.form += exhibition ? 3 : 8;
+        if (!exhibition)
+            ++G.kilix.rank_wins;
         if (fought_rank == G.kilix.rank && G.kilix.rank < RANK_COUNT - 1) {
             ++G.kilix.rank;
             G.kilix.rank_wins = 0;
             promoted = true;
         }
-        snprintf(title, sizeof(title), "%s Victory", RANK_NAMES[fought_rank]);
-        snprintf(detail, sizeof(detail),
-                 "%s defeated %s and earned %d coins.%s",
-                 G.kilix.name, rival->name, prize,
-                 promoted ? " A league promotion awaits!" : " The Crown crowd roars!");
+        if (exhibition) {
+            snprintf(title, sizeof(title), "%s Exhibition", RANK_NAMES[fought_rank]);
+            snprintf(detail, sizeof(detail),
+                     "%s bested %s in a friendly rematch and earned a %d coin purse.",
+                     G.kilix.name, rival->name, prize);
+        } else {
+            snprintf(title, sizeof(title), "%s Victory", RANK_NAMES[fought_rank]);
+            snprintf(detail, sizeof(detail),
+                     "%s defeated %s and earned %d coins.%s",
+                     G.kilix.name, rival->name, prize,
+                     promoted ? " A league promotion awaits!" : " The Crown crowd roars!");
+        }
     } else if (battle->winner < 0) {
         ++G.kilix.total_losses;
         G.kilix.fatigue += 20;
@@ -2143,12 +2202,17 @@ void game_handle_key(int key)
             change_screen(SCREEN_TITLE);
         break;
     case SCREEN_CHAMPION:
-        if (key == KEY_ESC)
-            game_go_ranch();
-        else if (lower_key(key) == 'j')
+        if (lower_key(key) == 'j') {
             open_journal();
-        else if (is_confirm_key(key))
-            game_go_ranch();
+        } else if (is_confirm_key(key) || key == KEY_ESC) {
+            /* A Crown victory spends a week like any other match, but its
+             * result event routes here instead of through the usual
+             * dismissal path — so the deferred rent check must run now, or
+             * champions could dodge rent (and eviction) with every title
+             * defense. */
+            if (!present_rent_event())
+                game_go_ranch();
+        }
         break;
     default:
         change_screen(SCREEN_TITLE);
@@ -2246,7 +2310,7 @@ static bool valid_save_data(const SaveData *save)
     uint32_t expected;
     int i;
 
-    if (!save || save->version != SAVE_VERSION)
+    if (!save || (save->version != SAVE_VERSION && save->version != 2u))
         return false;
     copy = *save;
     expected = copy.checksum;
@@ -2257,9 +2321,16 @@ static bool valid_save_data(const SaveData *save)
         || save->total_weeks > SAVE_WEEKS_MAX
         || save->money < 0 || save->money > SAVE_MONEY_MAX)
         return false;
-    /* v3 economy fields: hunger in range, at least the basic move known and no
-     * unknown move bits, rent covering a sane, non-negative span. */
-    if (save->reserved[0] > 100
+    if (save->version == 2u) {
+        /* Pre-economy (initial release) saves share this exact layout but
+         * wrote every reserved slot as zero; anything else is corruption,
+         * not a v2 ranch. game_load fills in the economy defaults. */
+        for (i = 0; i < 4; ++i)
+            if (save->reserved[i] != 0u)
+                return false;
+    } else if (save->reserved[0] > 100
+        /* v3 economy fields: hunger in range, at least the basic move known
+         * and no unknown move bits, rent covering a sane, non-negative span. */
         || (save->reserved[1] & 1u) == 0
         || save->reserved[1] >= (1u << MOVE_COUNT)
         || (int32_t)save->reserved[2] < 0
@@ -2386,6 +2457,16 @@ bool game_load(void)
     loaded.moves_known = save.reserved[1] | 1u;   /* basic move always known */
     loaded.rent_paid_weeks = (int)save.reserved[2];
     loaded.bank = (int)save.reserved[3];
+    if (save.version == 2u) {
+        /* Migrate a pre-economy ranch: new-ranch hunger, and the newly
+         * introduced rent first falls due at the next month boundary (the
+         * same on-the-house grace a fresh ranch gets). moves_known and bank
+         * already read as their defaults from the zeroed reserved slots.
+         * The next autosave rewrites the record as version 3. */
+        loaded.kilix.hunger = 20;
+        loaded.rent_paid_weeks =
+            (save.total_weeks / MONTH_WEEKS + 1) * MONTH_WEEKS;
+    }
     loaded.save_exists = true;
     loaded.first_visit = false;
     loaded.battle.opponent = -1;
@@ -2770,6 +2851,36 @@ int game_selftest(unsigned seed, int weeks)
                        "a successful save must clear the sticky warning flag");
     }
 
+    /* A version-2 (pre-economy) ranch record must load with migrated economy
+     * defaults, not be rejected as damaged: those saves share the layout with
+     * every reserved slot zero. */
+    {
+        SaveData v2;
+        FILE *out;
+
+        fill_save_data(&v2);
+        v2.version = 2u;
+        memset(v2.reserved, 0, sizeof v2.reserved);
+        v2.checksum = 0;
+        v2.checksum = hash_bytes(&v2, sizeof v2);
+        out = fopen(test_path, "wb");
+        if (out) {
+            fwrite(SAVE_MAGIC, 1, sizeof SAVE_MAGIC, out);
+            fwrite(&v2, 1, sizeof v2, out);
+            fclose(out);
+            SELFTEST_CHECK(game_load(),
+                           "a version-2 ranch record must still load");
+            SELFTEST_CHECK(G.moves_known == 1u && G.bank == 0
+                           && G.kilix.hunger == 20
+                           && G.rent_paid_weeks ==
+                              ((int)v2.total_weeks / MONTH_WEEKS + 1)
+                                  * MONTH_WEEKS,
+                           "v2 migration must apply new-ranch economy defaults");
+        } else {
+            SELFTEST_CHECK(false, "could not create v2 save fixture");
+        }
+    }
+
     SELFTEST_CHECK(game_delete_save(), "isolated save cleanup failed");
     SELFTEST_CHECK(game_delete_save(), "deleting a missing save should succeed");
 
@@ -2906,6 +3017,100 @@ int game_selftest(unsigned seed, int weeks)
         game_handle_key(KEY_ESC);                    /* mid-fight Esc = forfeit */
         SELFTEST_CHECK(G.screen == SCREEN_EVENT && G.event.kind == EVENT_EVICTION,
                        "forfeiting at an unpayable rent boundary must still evict");
+    }
+
+    /* A cleared league's rival accepts exhibition rematches: half prize, a
+     * week spent, and never a promotion or rank-win credit. */
+    {
+        int before_money, before_weeks;
+
+        for (i = 0; i < STAT_COUNT; ++i)
+            G.kilix.stats.value[i] = 400;
+        G.kilix.fatigue = G.kilix.stress = 0;
+        G.kilix.rank = 1;
+        G.kilix.rank_wins = 0;
+        G.total_weeks = 20; G.kilix.age_weeks = 20;
+        G.rent_paid_weeks = 48;              /* rent far off: isolate the purse */
+        G.money = 1000; G.bank = 0;
+        before_money = G.money;
+        before_weeks = G.total_weeks;
+        G.screen = SCREEN_ARENA;
+        G.arena_cursor = 0;
+        game_start_battle(0);
+        SELFTEST_CHECK(G.screen == SCREEN_BATTLE,
+                       "a cleared rival must accept an exhibition rematch");
+        G.battle.phase = BATTLE_FINISHED;
+        G.battle.winner = 1;
+        settle_battle();
+        SELFTEST_CHECK(G.money == before_money + OPPONENTS[0].prize / 2,
+                       "an exhibition win must pay half the prize");
+        SELFTEST_CHECK(G.kilix.rank == 1 && G.kilix.rank_wins == 0,
+                       "an exhibition win must not promote or credit rank wins");
+        SELFTEST_CHECK(G.total_weeks == before_weeks + 1,
+                       "an exhibition match must spend a week");
+        game_tick(0.15f);
+        game_handle_key(KEY_ENTER);          /* dismiss the result event */
+    }
+
+    /* Drill Esc semantics: free only during the get-ready countdown; a live
+     * drill forfeits (week spent), and the result screen banks the reward —
+     * a completed session can never be discarded and rerolled. */
+    {
+        int before_weeks, before_stat;
+
+        G.rent_paid_weeks = 48;
+        G.screen = SCREEN_DRILL;
+        memset(&G.minigame, 0, sizeof G.minigame);
+        G.minigame.drill = 0;
+        G.minigame.type = drill_minigame(0);
+        G.minigame.phase = 0;                /* countdown */
+        before_weeks = G.total_weeks;
+        game_handle_key(KEY_ESC);
+        SELFTEST_CHECK(G.total_weeks == before_weeks
+                       && G.screen == SCREEN_TRAINING,
+                       "countdown Esc must stay free of charge");
+
+        G.screen = SCREEN_DRILL;
+        memset(&G.minigame, 0, sizeof G.minigame);
+        G.minigame.drill = 0;
+        G.minigame.type = drill_minigame(0);
+        G.minigame.phase = 1;                /* live */
+        G.minigame.rounds = 3;
+        game_handle_key(KEY_ESC);
+        SELFTEST_CHECK(G.total_weeks == before_weeks + 1,
+                       "abandoning a live drill must still spend the week");
+        game_tick(0.15f);
+        game_handle_key(KEY_ENTER);
+
+        G.screen = SCREEN_DRILL;
+        memset(&G.minigame, 0, sizeof G.minigame);
+        G.minigame.drill = 0;
+        G.minigame.type = drill_minigame(0);
+        G.minigame.phase = 2;                /* result screen */
+        G.minigame.quality = 0.9f;
+        G.kilix.fatigue = G.kilix.stress = 20;
+        before_weeks = G.total_weeks;
+        before_stat = G.kilix.stats.value[DRILLS[0].primary];
+        game_handle_key(KEY_ESC);
+        SELFTEST_CHECK(G.total_weeks == before_weeks + 1
+                       && G.kilix.stats.value[DRILLS[0].primary] > before_stat,
+                       "Esc on the drill result must bank the session");
+        game_tick(0.15f);
+        game_handle_key(KEY_ENTER);
+    }
+
+    /* Leaving the champion screen must run the deferred rent check: a broke
+     * Crown champion cannot dodge eviction by winning title defenses. */
+    {
+        G.screen = SCREEN_CHAMPION;
+        G.kilix.rank = RANK_COUNT - 1;
+        G.total_weeks = 24; G.kilix.age_weeks = 24;
+        G.rent_paid_weeks = 24;
+        G.money = 0; G.bank = 0;
+        game_handle_key(KEY_ENTER);
+        SELFTEST_CHECK(G.screen == SCREEN_EVENT
+                       && G.event.kind == EVENT_EVICTION,
+                       "champion exit must still collect overdue rent");
     }
 
     suppress_autosave = old_suppression;

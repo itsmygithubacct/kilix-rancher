@@ -370,6 +370,7 @@ const char *game_condition(void);
 int game_year(void);
 int game_week_of_year(void);
 int game_overall_rating(void);
+float game_drill_condition(int drill_index);
 
 /* Software renderer. */
 bool render_init(int width, int height, char *error, size_t error_len);
@@ -380,13 +381,10 @@ const uint8_t *render_fb(void);
 bool render_dump_ppm(const char *path);
 bool render_validate_assets(char *error, size_t error_len);
 
-/* Terminal and audio platform layers. */
-bool term_init(int *out_width, int *out_height);
-bool term_check_resize(int *out_width, int *out_height);
-void term_present(const uint8_t *rgba, int width, int height);
-int term_poll_key(void);
-void term_shutdown(void);
-void term_emergency_restore(void);
+/* Platform layer (main.c drives the shared kilix-game-kit host). Whether the
+ * most recent key delivered to game_handle_key was keyboard auto-repeat
+ * rather than a fresh press — the mash drill counts only genuine presses. */
+bool input_key_repeated(void);
 
 bool sound_init(void);
 void sound_play(SoundId id);

@@ -45,9 +45,12 @@ make
 Audio is optional. The shared mixer probes `pacat`, `pw-play`, `aplay`, and
 SoX `play`; the game remains fully playable without one.
 
-Keyboard input, Kitty presentation, and audio mixing use vendored
-`kitty_keyboard`, `kitty-framebuffer`, and `pcm-mixer` sources under
-`third_party/`; the illustrated ranch renderer remains game-specific.
+The interactive session runs on the shared `kilix-game-kit` host under
+`third_party/`: fixed-step simulation timing, the Kitty terminal session,
+orderly Ctrl-C/SIGTERM shutdown, terminal-safe Ctrl-Z suspension, and
+crash-time terminal restore all come from the kit, as do the audio cue bank
+and asset-root discovery. The illustrated ranch renderer remains
+game-specific.
 
 ## Controls
 
@@ -57,7 +60,7 @@ Keyboard input, Kitty presentation, and audio mixing use vendored
 | Left / Right | Change range during a live battle (not before it starts) |
 | Enter / Space | Choose; call the selected battle move |
 | 1–4 | Call a battle move directly |
-| Esc | Go back; on the arena Ready prompt it cancels with no penalty, but forfeits a match already in progress |
+| Esc | Go back; matches and drills cancel freely before they begin (the Ready prompt, the get-ready countdown) but are forfeited once underway |
 | J | Open the field journal (from the ranch or champion screen) |
 | M | Toggle sound |
 | Q | Quit from the title, ranch, or champion screen |
@@ -77,8 +80,9 @@ rings before a knockout, the greater remaining Heart percentage wins.
 Each meaningful ranch action advances one week. Drills improve two gifts but
 add fatigue and stress. Catnaps recover both. Care costs money but can improve
 bond, form, or recovery. Arena wins are the main source of money and unlock the
-next league. Kilix visibly reacts to poor condition, so the UI never requires
-hidden-number memorization.
+next league; cleared rivals remain available for half-purse exhibition
+rematches, so rent money is never permanently out of reach. Kilix visibly
+reacts to poor condition, so the UI never requires hidden-number memorization.
 
 The six gifts are Heart, Claw, Flame, Guard, Agility, and Focus. They map to
 health, physical force, special force, damage reduction, evasion/range motion,
