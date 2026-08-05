@@ -302,12 +302,14 @@ static int render_test(const char *directory, unsigned seed)
 
 static void print_help(void)
 {
-    printf("kilix-rancher - original graphical fire-kitten raising game\n\n"
+    printf("kilix-rancher " KILIX_RANCHER_VERSION
+           " - original graphical fire-kitten raising game\n\n"
            "Usage:\n"
            "  ./kilix-rancher                    Play in a Kitty-graphics terminal\n"
            "  ./kilix-rancher --selftest [seed] [weeks]\n"
            "  ./kilix-rancher --render-test [directory] [seed]\n"
            "  ./kilix-rancher --validate-assets\n"
+           "  ./kilix-rancher --version\n"
            "  ./kilix-rancher --help\n\n"
            "Controls:\n"
            "  Arrows / W,S     Move the cursor; up/down pick a battle move\n"
@@ -435,6 +437,10 @@ int main(int argc, char **argv)
 
     if (argc > 1 && !strcmp(argv[1], "--help")) {
         print_help();
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "--version")) {
+        printf("kilix-rancher %s\n", KILIX_RANCHER_VERSION);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "--validate-assets")) {

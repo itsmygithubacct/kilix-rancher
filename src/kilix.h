@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#define KILIX_RANCHER_VERSION "0.1.8"
+
 #define TICK_DT (1.0f / 60.0f)
 #define STAT_COUNT 6
 #define DRILL_COUNT 6
