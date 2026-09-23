@@ -1,3 +1,5 @@
+> **Moved.** kilix-rancher now lives in the [kilix-games](https://github.com/itsmygithubacct/kilix-games/tree/main/kilix-rancher) monorepo, with its full history, and builds against that repository's shared kilix-game-sdk. This repository is archived; its code stays here for installs pinned to older commits.
+
 # Kilix Rancher
 
 An original graphical creature-raising game for Linux terminals that implement
